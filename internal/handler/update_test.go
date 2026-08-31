@@ -1,6 +1,7 @@
 package handler_test
 
 import (
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -28,6 +29,26 @@ func (f *fakeStorage) UpdateGauge(name string, value float64) {
 
 func (f *fakeStorage) UpdateCounter(name string, delta int64) {
 	f.counters[name] += delta
+}
+
+func (f *fakeStorage) Gauge(name string) (float64, bool) {
+	value, ok := f.gauges[name]
+
+	return value, ok
+}
+
+func (f *fakeStorage) Counter(name string) (int64, bool) {
+	delta, ok := f.counters[name]
+
+	return delta, ok
+}
+
+func (f *fakeStorage) Gauges() map[string]float64 {
+	return maps.Clone(f.gauges)
+}
+
+func (f *fakeStorage) Counters() map[string]int64 {
+	return maps.Clone(f.counters)
 }
 
 func do(store handler.Storage, method, path string) *httptest.ResponseRecorder {
@@ -71,8 +92,17 @@ func TestUpdateCounter(t *testing.T) {
 	rec = do(store, http.MethodPost, "/update/counter/PollCount/10")
 	require.Equal(t, http.StatusOK, rec.Code)
 
-	// counter суммируется
 	assert.Equal(t, int64(15), store.counters["PollCount"])
+}
+
+func TestUpdateEmptyName(t *testing.T) {
+	store := newFakeStorage()
+
+	rec := do(store, http.MethodPost, "/update/gauge//12.5")
+
+	require.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Empty(t, store.gauges)
+	assert.Empty(t, store.counters)
 }
 
 func TestUpdateBadRequest(t *testing.T) {

@@ -3,43 +3,39 @@ package handler
 import (
 	"net/http"
 	"strconv"
+
+	"github.com/go-chi/chi/v5"
+
+	models "github.com/Kusaykin/go-telemetry/internal/model"
 )
 
-const (
-	typeGauge   = "gauge"
-	typeCounter = "counter"
-)
+func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
+	name := chi.URLParam(r, "name")
+	if name == "" {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
 
-type Storage interface {
-	UpdateGauge(name string, value float64)
-	UpdateCounter(name string, delta int64)
-}
-
-func NewUpdateHandler(s Storage) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		name := r.PathValue("name")
-
-		switch r.PathValue("type") {
-		case typeGauge:
-			value, err := strconv.ParseFloat(r.PathValue("value"), 64)
-			if err != nil {
-				w.WriteHeader(http.StatusBadRequest)
-				return
-			}
-			s.UpdateGauge(name, value)
-		case typeCounter:
-			delta, err := strconv.ParseInt(r.PathValue("value"), 10, 64)
-			if err != nil {
-				w.WriteHeader(http.StatusBadRequest)
-				return
-			}
-			s.UpdateCounter(name, delta)
-		default:
+	switch chi.URLParam(r, "type") {
+	case models.Gauge:
+		value, err := strconv.ParseFloat(chi.URLParam(r, "value"), 64)
+		if err != nil {
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
-
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
+		h.store.UpdateGauge(name, value)
+	case models.Counter:
+		delta, err := strconv.ParseInt(chi.URLParam(r, "value"), 10, 64)
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		h.store.UpdateCounter(name, delta)
+	default:
+		w.WriteHeader(http.StatusBadRequest)
+		return
 	}
+
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
 }

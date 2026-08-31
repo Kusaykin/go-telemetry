@@ -82,6 +82,34 @@ func TestPollCount(t *testing.T) {
 	m := findMetric(c.Snapshot(), PollCountName)
 	require.NotNil(t, m.Delta)
 	assert.Equal(t, int64(3), *m.Delta)
+	assert.Equal(t, int64(3), c.PollCountDelta())
+}
+
+func TestPollCountResetAfterAck(t *testing.T) {
+	c := NewCollector()
+	c.Poll()
+	c.Poll()
+
+	c.AckPollCount(c.PollCountDelta())
+	assert.Equal(t, int64(0), c.PollCountDelta())
+
+	c.Poll()
+
+	m := findMetric(c.Snapshot(), PollCountName)
+	require.NotNil(t, m.Delta)
+	assert.Equal(t, int64(1), *m.Delta)
+}
+
+func TestPollCountAckKeepsNewPolls(t *testing.T) {
+	c := NewCollector()
+	c.Poll()
+	c.Poll()
+
+	sent := c.PollCountDelta()
+	c.Poll()
+	c.AckPollCount(sent)
+
+	assert.Equal(t, int64(1), c.PollCountDelta())
 }
 
 func TestRandomValueChanges(t *testing.T) {

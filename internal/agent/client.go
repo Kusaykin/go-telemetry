@@ -5,8 +5,9 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"strconv"
 	"time"
+
+	"github.com/go-resty/resty/v2"
 
 	models "github.com/Kusaykin/go-telemetry/internal/model"
 )
@@ -14,14 +15,15 @@ import (
 const requestTimeout = 5 * time.Second
 
 type Client struct {
-	baseURL string
-	http    *http.Client
+	rest *resty.Client
 }
 
 func NewClient(addr string) *Client {
 	return &Client{
-		baseURL: "http://" + addr,
-		http:    &http.Client{Timeout: requestTimeout},
+		rest: resty.New().
+			SetBaseURL("http://"+addr).
+			SetTimeout(requestTimeout).
+			SetHeader("Content-Type", "text/plain"),
 	}
 }
 
@@ -43,40 +45,20 @@ func (c *Client) Send(m models.Metrics) error {
 		return err
 	}
 
-	endpoint := c.baseURL + "/update/" + url.PathEscape(m.MType) + "/" + url.PathEscape(m.ID) + "/" + url.PathEscape(value)
+	path := "/update/" + url.PathEscape(m.MType) + "/" + url.PathEscape(m.ID) + "/" + url.PathEscape(value)
 
-	req, err := http.NewRequest(http.MethodPost, endpoint, http.NoBody)
-	if err != nil {
-		return fmt.Errorf("build request for %s: %w", m.ID, err)
-	}
-	req.Header.Set("Content-Type", "text/plain")
-
-	resp, err := c.http.Do(req)
+	resp, err := c.rest.R().Post(path)
 	if err != nil {
 		return fmt.Errorf("send %s: %w", m.ID, err)
 	}
-	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("send %s: unexpected status %d", m.ID, resp.StatusCode)
+	if resp.StatusCode() != http.StatusOK {
+		return fmt.Errorf("send %s: unexpected status %d", m.ID, resp.StatusCode())
 	}
 
 	return nil
 }
 
 func metricValue(m models.Metrics) (string, error) {
-	switch m.MType {
-	case models.Gauge:
-		if m.Value == nil {
-			return "", fmt.Errorf("gauge %s: value is not set", m.ID)
-		}
-		return strconv.FormatFloat(*m.Value, 'f', -1, 64), nil
-	case models.Counter:
-		if m.Delta == nil {
-			return "", fmt.Errorf("counter %s: delta is not set", m.ID)
-		}
-		return strconv.FormatInt(*m.Delta, 10), nil
-	default:
-		return "", fmt.Errorf("metric %s: unknown type %q", m.ID, m.MType)
-	}
+	return m.ValueString()
 }

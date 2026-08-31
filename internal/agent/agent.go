@@ -30,8 +30,6 @@ func DefaultConfig() Config {
 	}
 }
 
-// Agent с частотой PollInterval обновляет метрики рантайма и с частотой
-// ReportInterval отправляет их на сервер.
 type Agent struct {
 	cfg       Config
 	collector *Collector
@@ -66,12 +64,16 @@ func (a *Agent) tick() {
 	a.elapsed = 0
 
 	snapshot := a.collector.Snapshot()
+	pollCount := a.collector.PollCountDelta()
 
 	a.logReport(snapshot)
 
 	if err := a.client.SendAll(snapshot); err != nil {
 		log.Println("report failed:", err)
+		return
 	}
+
+	a.collector.AckPollCount(pollCount)
 }
 
 func (a *Agent) logReport(snapshot []models.Metrics) {

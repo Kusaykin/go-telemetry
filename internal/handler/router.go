@@ -1,16 +1,24 @@
 package handler
 
-import "net/http"
+import (
+	"net/http"
+
+	"github.com/go-chi/chi/v5"
+)
 
 func NewRouter(s Storage) http.Handler {
-	update := NewUpdateHandler(s)
+	h := New(s)
 
-	mux := http.NewServeMux()
-	mux.Handle("POST /update/{type}/{name}/{value}", update)
-	mux.Handle("POST /update/{type}/{name}/{$}", update)
-	mux.HandleFunc("POST /update/{type}/{name}", func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusNotFound)
+	r := chi.NewRouter()
+
+	r.Get("/", h.Index)
+
+	r.Route("/update", func(r chi.Router) {
+		r.Post("/{type}/{name}/{value}", h.Update)
+		r.Post("/{type}/{name}/", h.Update)
 	})
 
-	return mux
+	r.Get("/value/{type}/{name}", h.Value)
+
+	return r
 }

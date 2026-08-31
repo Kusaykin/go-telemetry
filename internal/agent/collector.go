@@ -80,3 +80,11 @@ func (c *Collector) Snapshot() []models.Metrics {
 
 	return snapshot
 }
+
+func (c *Collector) PollCountDelta() int64 {
+	return c.pollCount
+}
+
+func (c *Collector) AckPollCount(delta int64) {
+	c.pollCount -= delta
+}
