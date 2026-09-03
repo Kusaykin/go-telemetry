@@ -18,10 +18,11 @@ type request struct {
 
 type testServer struct {
 	requests []request
+	status   int
 }
 
 func newTestServer(t *testing.T, status int) (*testServer, *Client) {
-	ts := &testServer{}
+	ts := &testServer{status: status}
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ts.requests = append(ts.requests, request{
@@ -29,7 +30,7 @@ func newTestServer(t *testing.T, status int) (*testServer, *Client) {
 			path:        r.URL.Path,
 			contentType: r.Header.Get("Content-Type"),
 		})
-		w.WriteHeader(status)
+		w.WriteHeader(ts.status)
 	}))
 	t.Cleanup(srv.Close)
 
@@ -117,4 +118,20 @@ func TestSendAll(t *testing.T) {
 	assert.Equal(t, "/update/gauge/Alloc/1", ts.requests[0].path)
 	assert.Equal(t, "/update/gauge/Sys/2", ts.requests[1].path)
 	assert.Equal(t, "/update/counter/PollCount/3", ts.requests[2].path)
+}
+
+func TestSendAllStopsOnFirstError(t *testing.T) {
+	ts, client := newTestServer(t, http.StatusInternalServerError)
+
+	metrics := []models.Metrics{
+		gauge("Alloc", 1),
+		gauge("Sys", 2),
+		counter("PollCount", 3),
+	}
+
+	err := client.SendAll(metrics)
+	require.Error(t, err)
+
+	require.Len(t, ts.requests, 1)
+	assert.Equal(t, "/update/gauge/Alloc/1", ts.requests[0].path)
 }

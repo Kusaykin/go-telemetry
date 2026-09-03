@@ -7,38 +7,19 @@ import (
 	"os"
 	"time"
 
+	"github.com/Kusaykin/go-telemetry/internal/config"
 	models "github.com/Kusaykin/go-telemetry/internal/model"
 )
 
-const (
-	DefaultAddress        = "localhost:8080"
-	DefaultPollInterval   = 2 * time.Second
-	DefaultReportInterval = 10 * time.Second
-)
-
-type Config struct {
-	Address        string
-	PollInterval   time.Duration
-	ReportInterval time.Duration
-}
-
-func DefaultConfig() Config {
-	return Config{
-		Address:        DefaultAddress,
-		PollInterval:   DefaultPollInterval,
-		ReportInterval: DefaultReportInterval,
-	}
-}
-
 type Agent struct {
-	cfg       Config
+	cfg       config.Agent
 	collector *Collector
 	client    *Client
 	out       io.Writer
 	elapsed   time.Duration // время, прошедшее с последнего отчёта
 }
 
-func New(cfg Config) *Agent {
+func New(cfg config.Agent) *Agent {
 	return &Agent{
 		cfg:       cfg,
 		collector: NewCollector(),
@@ -80,7 +61,7 @@ func (a *Agent) logReport(snapshot []models.Metrics) {
 	fmt.Fprintf(a.out, "--- отчёт, метрик: %d ---\n", len(snapshot))
 
 	for _, m := range snapshot {
-		value, err := metricValue(m)
+		value, err := m.ValueString()
 		if err != nil {
 			fmt.Fprintf(a.out, "%-7s %-14s ошибка: %v\n", m.MType, m.ID, err)
 			continue

@@ -1,7 +1,6 @@
 package agent
 
 import (
-	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -28,19 +27,17 @@ func NewClient(addr string) *Client {
 }
 
 func (c *Client) SendAll(metrics []models.Metrics) error {
-	var errs []error
-
 	for _, m := range metrics {
 		if err := c.Send(m); err != nil {
-			errs = append(errs, err)
+			return err
 		}
 	}
 
-	return errors.Join(errs...)
+	return nil
 }
 
 func (c *Client) Send(m models.Metrics) error {
-	value, err := metricValue(m)
+	value, err := m.ValueString()
 	if err != nil {
 		return err
 	}
@@ -57,8 +54,4 @@ func (c *Client) Send(m models.Metrics) error {
 	}
 
 	return nil
-}
-
-func metricValue(m models.Metrics) (string, error) {
-	return m.ValueString()
 }

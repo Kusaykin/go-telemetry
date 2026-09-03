@@ -1,64 +1,94 @@
 package main
 
 import (
-	"flag"
+	"context"
 	"io"
+	"net"
+	"net/http"
 	"testing"
 
+	"github.com/Kusaykin/go-telemetry/internal/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-func TestParseFlagsDefaults(t *testing.T) {
-	cfg, err := parseFlags(nil, io.Discard)
+func TestNewServer(t *testing.T) {
+	srv := newServer(config.Server{Address: "127.0.0.1:9090"})
 
+	assert.Equal(t, "127.0.0.1:9090", srv.Addr)
+	assert.NotNil(t, srv.Handler)
+}
+
+func startServer(t *testing.T) string {
+	t.Helper()
+
+	l, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
-	assert.Equal(t, "localhost:8080", cfg.Address)
+
+	srv := newServer(config.DefaultServer())
+	go srv.Serve(l)
+
+	t.Cleanup(func() {
+		assert.NoError(t, srv.Shutdown(context.Background()))
+	})
+
+	return "http://" + l.Addr().String()
 }
 
-func TestParseFlagsAddress(t *testing.T) {
-	tests := []struct {
-		name string
-		args []string
-		want string
-	}{
-		{"через знак равенства", []string{"-a=example:9090"}, "example:9090"},
-		{"через пробел", []string{"-a", "example:9090"}, "example:9090"},
-		{"только порт", []string{"-a=:9090"}, ":9090"},
-	}
+func post(t *testing.T, url string) int {
+	t.Helper()
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			cfg, err := parseFlags(tt.args, io.Discard)
+	resp, err := http.Post(url, "text/plain", nil)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
 
-			require.NoError(t, err)
-			assert.Equal(t, tt.want, cfg.Address)
-		})
-	}
+	return resp.StatusCode
 }
 
-func TestParseFlagsErrors(t *testing.T) {
-	tests := []struct {
-		name string
-		args []string
-	}{
-		{"неизвестный флаг", []string{"-x=1"}},
-		{"неизвестный флаг без значения", []string{"-unknown"}},
-		{"флаг агента серверу не подходит", []string{"-p=2"}},
-		{"лишний позиционный аргумент", []string{"-a=example:9090", "мусор"}},
-	}
+func get(t *testing.T, url string) (int, string) {
+	t.Helper()
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			_, err := parseFlags(tt.args, io.Discard)
+	resp, err := http.Get(url)
+	require.NoError(t, err)
 
-			assert.Error(t, err)
-		})
-	}
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+
+	return resp.StatusCode, string(body)
 }
 
-func TestParseFlagsHelp(t *testing.T) {
-	_, err := parseFlags([]string{"-h"}, io.Discard)
+func TestServerStoresMetrics(t *testing.T) {
+	base := startServer(t)
 
-	assert.ErrorIs(t, err, flag.ErrHelp)
+	require.Equal(t, http.StatusOK, post(t, base+"/update/counter/PollCount/5"))
+	require.Equal(t, http.StatusOK, post(t, base+"/update/counter/PollCount/10"))
+	require.Equal(t, http.StatusOK, post(t, base+"/update/gauge/Alloc/12.5"))
+
+	status, body := get(t, base+"/value/counter/PollCount")
+	assert.Equal(t, http.StatusOK, status)
+	assert.Equal(t, "15", body)
+
+	status, body = get(t, base+"/value/gauge/Alloc")
+	assert.Equal(t, http.StatusOK, status)
+	assert.Equal(t, "12.5", body)
+}
+
+func TestServerServesIndex(t *testing.T) {
+	base := startServer(t)
+
+	require.Equal(t, http.StatusOK, post(t, base+"/update/gauge/Alloc/12.5"))
+
+	status, body := get(t, base+"/")
+	assert.Equal(t, http.StatusOK, status)
+	assert.Contains(t, body, "Alloc")
+}
+
+func TestServerRejectsUnknownMetric(t *testing.T) {
+	base := startServer(t)
+
+	assert.Equal(t, http.StatusBadRequest, post(t, base+"/update/unknown/Alloc/12.5"))
+
+	status, _ := get(t, base+"/value/gauge/Missing")
+	assert.Equal(t, http.StatusNotFound, status)
 }

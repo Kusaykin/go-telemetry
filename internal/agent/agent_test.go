@@ -8,19 +8,11 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 
+	"github.com/Kusaykin/go-telemetry/internal/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-func TestDefaultConfig(t *testing.T) {
-	cfg := DefaultConfig()
-
-	assert.Equal(t, "localhost:8080", cfg.Address)
-	assert.Equal(t, 2*time.Second, cfg.PollInterval)
-	assert.Equal(t, 10*time.Second, cfg.ReportInterval)
-}
 
 func paths(ts *testServer) []string {
 	result := make([]string, 0, len(ts.requests))
@@ -47,7 +39,7 @@ func TestAgentSendsReportEveryFifthPoll(t *testing.T) {
 	ts, client := newTestServer(t, http.StatusOK)
 	out := &bytes.Buffer{}
 
-	a := New(DefaultConfig())
+	a := New(config.DefaultAgent())
 	a.client = client
 	a.out = out
 
@@ -82,7 +74,7 @@ func TestPollCountAccumulatesToPollsOnServer(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	a := New(DefaultConfig())
+	a := New(config.DefaultAgent())
 	a.client = NewClient(srv.Listener.Addr().String())
 	a.out = &bytes.Buffer{}
 
@@ -97,7 +89,7 @@ func TestPollCountAccumulatesToPollsOnServer(t *testing.T) {
 func TestPollCountSurvivesFailedReport(t *testing.T) {
 	ts, client := newTestServer(t, http.StatusInternalServerError)
 
-	a := New(DefaultConfig())
+	a := New(config.DefaultAgent())
 	a.client = client
 	a.out = &bytes.Buffer{}
 
@@ -105,15 +97,23 @@ func TestPollCountSurvivesFailedReport(t *testing.T) {
 		a.tick()
 	}
 
-	assert.Contains(t, paths(ts), "/update/counter/PollCount/5")
-	assert.Contains(t, paths(ts), "/update/counter/PollCount/10")
+	assert.NotContains(t, paths(ts), "/update/counter/PollCount/5")
+	assert.Equal(t, int64(10), a.collector.PollCountDelta())
+
+	ts.status = http.StatusOK
+	for i := 0; i < 5; i++ {
+		a.tick()
+	}
+
+	assert.Contains(t, paths(ts), "/update/counter/PollCount/15")
+	assert.Zero(t, a.collector.PollCountDelta())
 }
 
 func TestAgentLogsReport(t *testing.T) {
 	_, client := newTestServer(t, http.StatusOK)
 	out := &bytes.Buffer{}
 
-	a := New(DefaultConfig())
+	a := New(config.DefaultAgent())
 	a.client = client
 	a.out = out
 
@@ -130,7 +130,7 @@ func TestAgentSurvivesServerErrors(t *testing.T) {
 	ts, client := newTestServer(t, http.StatusInternalServerError)
 	out := &bytes.Buffer{}
 
-	a := New(DefaultConfig())
+	a := New(config.DefaultAgent())
 	a.client = client
 	a.out = out
 
@@ -138,6 +138,6 @@ func TestAgentSurvivesServerErrors(t *testing.T) {
 		a.tick()
 	}
 
-	assert.Len(t, ts.requests, 2*metricsCount)
+	assert.Len(t, ts.requests, 2)
 	assert.Equal(t, 2, strings.Count(out.String(), "--- отчёт"))
 }
