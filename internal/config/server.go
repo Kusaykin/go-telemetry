@@ -12,13 +12,13 @@ func DefaultServer() Server {
 	}
 }
 
-func LoadServer(args []string, errOut io.Writer) (Server, error) {
+func LoadServer(args []string, lookup LookupEnv, errOut io.Writer) (Server, error) {
 	cfg := DefaultServer()
 
 	fs := newFlagSet("server", errOut)
-	fs.StringVar(&cfg.Address, "a", cfg.Address, addressUsage)
+	fs.stringVar(&cfg.Address, "a", envAddress, addressUsage)
 
-	if err := parse(fs, args, errOut); err != nil {
+	if err := fs.parse(args, lookup); err != nil {
 		return Server{}, err
 	}
 

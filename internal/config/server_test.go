@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"flag"
 	"io"
 	"testing"
@@ -14,7 +15,7 @@ func TestDefaultServer(t *testing.T) {
 }
 
 func TestLoadServerDefaults(t *testing.T) {
-	cfg, err := LoadServer(nil, io.Discard)
+	cfg, err := LoadServer(nil, nil, io.Discard)
 
 	require.NoError(t, err)
 	assert.Equal(t, "localhost:8080", cfg.Address)
@@ -34,7 +35,7 @@ func TestLoadServerAddress(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cfg, err := LoadServer(tt.args, io.Discard)
+			cfg, err := LoadServer(tt.args, nil, io.Discard)
 
 			require.NoError(t, err)
 			assert.Equal(t, tt.want, cfg.Address)
@@ -55,7 +56,7 @@ func TestLoadServerErrors(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := LoadServer(tt.args, io.Discard)
+			_, err := LoadServer(tt.args, nil, io.Discard)
 
 			assert.Error(t, err)
 		})
@@ -63,7 +64,43 @@ func TestLoadServerErrors(t *testing.T) {
 }
 
 func TestLoadServerHelp(t *testing.T) {
-	_, err := LoadServer([]string{"-h"}, io.Discard)
+	_, err := LoadServer([]string{"-h"}, nil, io.Discard)
 
 	assert.ErrorIs(t, err, flag.ErrHelp)
+}
+
+func TestLoadServerEnv(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		env  map[string]string
+		want string
+	}{
+		{"только env", nil, map[string]string{"ADDRESS": "env:1"}, "env:1"},
+		{"env приоритетнее флага", []string{"-a=flag:2"}, map[string]string{"ADDRESS": "env:1"}, "env:1"},
+		{"флаг, если env не задан", []string{"-a=flag:2"}, map[string]string{}, "flag:2"},
+		{"пустой ADDRESS игнорируется", []string{"-a=flag:2"}, map[string]string{"ADDRESS": ""}, "flag:2"},
+		{"по умолчанию без env и флага", nil, map[string]string{}, "localhost:8080"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := LoadServer(tt.args, envMap(tt.env), io.Discard)
+
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, cfg.Address)
+		})
+	}
+}
+
+func TestLoadServerHelpListsEnv(t *testing.T) {
+	var out bytes.Buffer
+
+	_, err := LoadServer([]string{"-h"}, nil, &out)
+
+	require.ErrorIs(t, err, flag.ErrHelp)
+	assert.Contains(t, out.String(), "Usage of server:")
+	assert.Contains(t, out.String(), "-a string")
+	assert.Contains(t, out.String(), "ADDRESS")
+	assert.NotContains(t, out.String(), "REPORT_INTERVAL")
 }

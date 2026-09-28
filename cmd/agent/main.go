@@ -8,7 +8,7 @@ import (
 )
 
 func main() {
-	cfg, err := config.LoadAgent(os.Args[1:], os.Stderr)
+	cfg, err := config.LoadAgent(os.Args[1:], os.LookupEnv, os.Stderr)
 	if err != nil {
 		os.Exit(config.ExitCode(err))
 	}
