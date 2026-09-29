@@ -10,10 +10,11 @@ import (
 	"github.com/Kusaykin/go-telemetry/internal/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
 )
 
 func TestNewServer(t *testing.T) {
-	srv := newServer(config.Server{Address: "127.0.0.1:9090"})
+	srv := newServer(config.Server{Address: "127.0.0.1:9090"}, zap.NewNop())
 
 	assert.Equal(t, "127.0.0.1:9090", srv.Addr)
 	assert.NotNil(t, srv.Handler)
@@ -25,7 +26,7 @@ func startServer(t *testing.T) string {
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 
-	srv := newServer(config.DefaultServer())
+	srv := newServer(config.DefaultServer(), zap.NewNop())
 	go srv.Serve(l)
 
 	t.Cleanup(func() {

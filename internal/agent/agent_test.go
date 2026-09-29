@@ -1,7 +1,6 @@
 package agent
 
 import (
-	"bytes"
 	"net/http"
 	"net/http/httptest"
 	"path"
@@ -12,6 +11,9 @@ import (
 	"github.com/Kusaykin/go-telemetry/internal/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 func paths(ts *testServer) []string {
@@ -37,11 +39,8 @@ func countPath(ts *testServer, want string) int {
 
 func TestAgentSendsReportEveryFifthPoll(t *testing.T) {
 	ts, client := newTestServer(t, http.StatusOK)
-	out := &bytes.Buffer{}
-
-	a := New(config.DefaultAgent())
+	a := New(config.DefaultAgent(), zap.NewNop())
 	a.client = client
-	a.out = out
 
 	for i := 0; i < 4; i++ {
 		a.tick()
@@ -74,9 +73,8 @@ func TestPollCountAccumulatesToPollsOnServer(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	a := New(config.DefaultAgent())
+	a := New(config.DefaultAgent(), zap.NewNop())
 	a.client = NewClient(srv.Listener.Addr().String())
-	a.out = &bytes.Buffer{}
 
 	const polls = 20
 	for range polls {
@@ -89,9 +87,8 @@ func TestPollCountAccumulatesToPollsOnServer(t *testing.T) {
 func TestPollCountSurvivesFailedReport(t *testing.T) {
 	ts, client := newTestServer(t, http.StatusInternalServerError)
 
-	a := New(config.DefaultAgent())
+	a := New(config.DefaultAgent(), zap.NewNop())
 	a.client = client
-	a.out = &bytes.Buffer{}
 
 	for i := 0; i < 10; i++ {
 		a.tick()
@@ -111,33 +108,43 @@ func TestPollCountSurvivesFailedReport(t *testing.T) {
 
 func TestAgentLogsReport(t *testing.T) {
 	_, client := newTestServer(t, http.StatusOK)
-	out := &bytes.Buffer{}
+	core, logs := observer.New(zapcore.InfoLevel)
 
-	a := New(config.DefaultAgent())
+	a := New(config.DefaultAgent(), zap.New(core))
 	a.client = client
-	a.out = out
 
 	for i := 0; i < 5; i++ {
 		a.tick()
 	}
 
-	assert.Contains(t, out.String(), "--- отчёт, метрик: 29 ---")
-	assert.Contains(t, out.String(), PollCountName)
-	assert.Contains(t, out.String(), RandomValueName)
+	reports := logs.FilterMessage("report").All()
+	require.Len(t, reports, 1)
+	assert.Equal(t, int64(metricsCount), reports[0].ContextMap()["metrics"])
+
+	metrics := logs.FilterMessage("metric")
+	assert.Equal(t, metricsCount, metrics.Len())
+	assert.Equal(t, 1, metrics.FilterField(zap.String("id", PollCountName)).Len())
+	assert.Equal(t, 1, metrics.FilterField(zap.String("id", RandomValueName)).Len())
+	for _, e := range metrics.All() {
+		assert.Equal(t, zapcore.InfoLevel, e.Level)
+	}
 }
 
 func TestAgentSurvivesServerErrors(t *testing.T) {
 	ts, client := newTestServer(t, http.StatusInternalServerError)
-	out := &bytes.Buffer{}
+	core, logs := observer.New(zapcore.InfoLevel)
 
-	a := New(config.DefaultAgent())
+	a := New(config.DefaultAgent(), zap.New(core))
 	a.client = client
-	a.out = out
 
 	for i := 0; i < 10; i++ {
 		a.tick()
 	}
 
 	assert.Len(t, ts.requests, 2)
-	assert.Equal(t, 2, strings.Count(out.String(), "--- отчёт"))
+	assert.Equal(t, 2, logs.FilterMessage("report").Len())
+
+	failures := logs.FilterMessage("report failed").All()
+	require.Len(t, failures, 2)
+	assert.Equal(t, zapcore.ErrorLevel, failures[0].Level)
 }

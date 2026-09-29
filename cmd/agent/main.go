@@ -1,10 +1,12 @@
 package main
 
 import (
+	"fmt"
 	"os"
 
 	"github.com/Kusaykin/go-telemetry/internal/agent"
 	"github.com/Kusaykin/go-telemetry/internal/config"
+	"github.com/Kusaykin/go-telemetry/internal/logger"
 )
 
 func main() {
@@ -13,5 +15,12 @@ func main() {
 		os.Exit(config.ExitCode(err))
 	}
 
-	agent.New(cfg).Run()
+	log, err := logger.NewConsole("info")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	defer log.Sync()
+
+	agent.New(cfg, log).Run()
 }

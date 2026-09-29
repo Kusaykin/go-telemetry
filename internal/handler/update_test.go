@@ -9,6 +9,7 @@ import (
 	"github.com/Kusaykin/go-telemetry/internal/handler"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
 )
 
 type fakeStorage struct {
@@ -54,7 +55,7 @@ func (f *fakeStorage) Counters() map[string]int64 {
 func do(store handler.Storage, method, path string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(method, path, nil)
 	rec := httptest.NewRecorder()
-	handler.NewRouter(store).ServeHTTP(rec, req)
+	handler.NewRouter(store, zap.NewNop()).ServeHTTP(rec, req)
 
 	return rec
 }
