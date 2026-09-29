@@ -25,6 +25,12 @@ func TestRouter(t *testing.T) {
 		{"метод GET вместо POST", http.MethodGet, "/update/gauge/Alloc/12.5", http.StatusMethodNotAllowed},
 		{"нет имени метрики в /value", http.MethodGet, "/value/gauge", http.StatusNotFound},
 		{"метод POST вместо GET в /value", http.MethodPost, "/value/gauge/Alloc", http.StatusMethodNotAllowed},
+		{"JSON /update без тела", http.MethodPost, "/update", http.StatusBadRequest},
+		{"JSON /update со слешем", http.MethodPost, "/update/", http.StatusBadRequest},
+		{"метод GET вместо POST в JSON /update", http.MethodGet, "/update", http.StatusMethodNotAllowed},
+		{"JSON /value без тела", http.MethodPost, "/value", http.StatusBadRequest},
+		{"JSON /value со слешем", http.MethodPost, "/value/", http.StatusBadRequest},
+		{"метод GET вместо POST в JSON /value", http.MethodGet, "/value", http.StatusMethodNotAllowed},
 		{"список метрик", http.MethodGet, "/", http.StatusOK},
 		{"метод POST вместо GET в корне", http.MethodPost, "/", http.StatusMethodNotAllowed},
 	}

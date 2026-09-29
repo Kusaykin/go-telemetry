@@ -18,11 +18,15 @@ func NewRouter(s Storage, log *zap.Logger) http.Handler {
 	r.Get("/", h.Index)
 
 	r.Route("/update", func(r chi.Router) {
+		r.Post("/", h.UpdateJSON)
 		r.Post("/{type}/{name}/{value}", h.Update)
 		r.Post("/{type}/{name}/", h.Update)
 	})
 
-	r.Get("/value/{type}/{name}", h.Value)
+	r.Route("/value", func(r chi.Router) {
+		r.Post("/", h.ValueJSON)
+		r.Get("/{type}/{name}", h.Value)
+	})
 
 	return r
 }

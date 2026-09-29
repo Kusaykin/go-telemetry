@@ -25,11 +25,13 @@ func (m *MemStorage) UpdateGauge(name string, value float64) {
 	m.gauges[name] = value
 }
 
-func (m *MemStorage) UpdateCounter(name string, delta int64) {
+func (m *MemStorage) UpdateCounter(name string, delta int64) int64 {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	m.counters[name] += delta
+
+	return m.counters[name]
 }
 
 func (m *MemStorage) Gauge(name string) (float64, bool) {

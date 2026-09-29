@@ -2,7 +2,7 @@ package handler
 
 type Storage interface {
 	UpdateGauge(name string, value float64)
-	UpdateCounter(name string, delta int64)
+	UpdateCounter(name string, delta int64) int64
 	Gauge(name string) (float64, bool)
 	Counter(name string) (int64, bool)
 	Gauges() map[string]float64

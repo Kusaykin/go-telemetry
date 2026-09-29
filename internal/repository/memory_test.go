@@ -20,10 +20,10 @@ func TestUpdateGauge(t *testing.T) {
 func TestUpdateCounter(t *testing.T) {
 	m := NewMemStorage()
 
-	m.UpdateCounter("PollCount", 5)
+	assert.Equal(t, int64(5), m.UpdateCounter("PollCount", 5))
 	assert.Equal(t, int64(5), m.counters["PollCount"])
 
-	m.UpdateCounter("PollCount", 10)
+	assert.Equal(t, int64(15), m.UpdateCounter("PollCount", 10))
 	assert.Equal(t, int64(15), m.counters["PollCount"])
 }
 
