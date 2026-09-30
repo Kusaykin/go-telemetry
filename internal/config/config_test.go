@@ -100,3 +100,37 @@ func TestSecondsValueSet(t *testing.T) {
 		})
 	}
 }
+
+func TestNonNegativeSecondsValueSet(t *testing.T) {
+	tests := []struct {
+		name    string
+		in      string
+		want    time.Duration
+		wantErr error
+	}{
+		{"ноль допустим", "0", 0, nil},
+		{"одна секунда, а не наносекунда", "1", time.Second, nil},
+		{"300 секунд", "300", 300 * time.Second, nil},
+		{"отрицательное", "-1", 0, errNegative},
+		{"с единицами измерения", "10s", 0, errNotSeconds},
+		{"не число", "abc", 0, errNotSeconds},
+		{"переполнение Duration", "9999999999", 0, errTooManySeconds},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			v := nonNegativeSecondsValue(time.Minute)
+
+			err := v.Set(tt.in)
+
+			if tt.wantErr != nil {
+				assert.ErrorIs(t, err, tt.wantErr)
+				assert.Equal(t, time.Minute, time.Duration(v), "значение не должно меняться при ошибке")
+				return
+			}
+
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, time.Duration(v))
+		})
+	}
+}

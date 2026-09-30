@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+
+	models "github.com/Kusaykin/go-telemetry/internal/model"
 )
 
 func TestUpdateGauge(t *testing.T) {
@@ -111,4 +113,49 @@ func TestConcurrentAccess(t *testing.T) {
 	delta, ok := m.Counter("PollCount")
 	assert.True(t, ok)
 	assert.Equal(t, int64(50), delta)
+}
+
+func TestSnapshotSortedAndIndependent(t *testing.T) {
+	m := NewMemStorage()
+	m.UpdateGauge("b", 2)
+	m.UpdateGauge("a", 1)
+	m.UpdateCounter("c", 3)
+
+	snapshot := m.Snapshot()
+
+	var got []string
+	for _, metric := range snapshot {
+		got = append(got, metric.MType+"/"+metric.ID)
+	}
+	assert.Equal(t, []string{"counter/c", "gauge/a", "gauge/b"}, got)
+
+	*snapshot[1].Value = 100
+	value, _ := m.Gauge("a")
+	assert.Equal(t, 1.0, value, "изменение снимка не должно менять хранилище")
+}
+
+func TestRestoreReplacesContent(t *testing.T) {
+	m := NewMemStorage()
+	m.UpdateGauge("Old", 1)
+
+	src := NewMemStorage()
+	src.UpdateGauge("Alloc", 12.5)
+	src.UpdateCounter("PollCount", 5)
+
+	assert.NoError(t, m.restore(src.Snapshot()))
+	assert.Equal(t, map[string]float64{"Alloc": 12.5}, m.Gauges())
+	assert.Equal(t, map[string]int64{"PollCount": 5}, m.Counters())
+}
+
+func TestRestoreInvalidKeepsContent(t *testing.T) {
+	m := NewMemStorage()
+	m.UpdateGauge("Alloc", 1)
+
+	src := NewMemStorage()
+	src.UpdateGauge("Good", 2)
+	metrics := src.Snapshot()
+	metrics = append(metrics, models.Metrics{ID: "Bad", MType: models.Gauge})
+
+	assert.Error(t, m.restore(metrics))
+	assert.Equal(t, map[string]float64{"Alloc": 1}, m.Gauges())
 }

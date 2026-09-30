@@ -49,6 +49,16 @@ func (fs *flagSet) secondsVar(dst *time.Duration, name, env, usage string) {
 	fs.bindEnv(env, name)
 }
 
+func (fs *flagSet) nonNegativeSecondsVar(dst *time.Duration, name, env, usage string) {
+	fs.Var((*nonNegativeSecondsValue)(dst), name, usage)
+	fs.bindEnv(env, name)
+}
+
+func (fs *flagSet) boolVar(dst *bool, name, env, usage string) {
+	fs.BoolVar(dst, name, *dst, usage)
+	fs.bindEnv(env, name)
+}
+
 func (fs *flagSet) bindEnv(env, flagName string) {
 	f := fs.Lookup(flagName)
 	if f == nil {
@@ -136,24 +146,60 @@ const maxSeconds = int64(math.MaxInt64 / int64(time.Second))
 var (
 	errNotSeconds     = errors.New("ожидается целое число секунд")
 	errNotPositive    = errors.New("должно быть больше нуля")
+	errNegative       = errors.New("не должно быть отрицательным")
 	errTooManySeconds = fmt.Errorf("должно быть не больше %d", maxSeconds)
 )
 
 func (v *secondsValue) Set(s string) error {
-	seconds, err := strconv.ParseInt(s, 10, 64)
-	if err != nil && !errors.Is(err, strconv.ErrRange) {
-		return errNotSeconds
-	}
-
-	if seconds <= 0 {
+	d, err := parseSeconds(s)
+	if errors.Is(err, errNegative) {
 		return errNotPositive
 	}
 
-	if seconds > maxSeconds {
-		return errTooManySeconds
+	if err != nil {
+		return err
 	}
 
-	*v = secondsValue(time.Duration(seconds) * time.Second)
+	if d == 0 {
+		return errNotPositive
+	}
+
+	*v = secondsValue(d)
 
 	return nil
+}
+
+// nonNegativeSecondsValue — как secondsValue, но допускает 0.
+type nonNegativeSecondsValue time.Duration
+
+func (v *nonNegativeSecondsValue) String() string {
+	return (*secondsValue)(v).String()
+}
+
+func (v *nonNegativeSecondsValue) Set(s string) error {
+	d, err := parseSeconds(s)
+	if err != nil {
+		return err
+	}
+
+	*v = nonNegativeSecondsValue(d)
+
+	return nil
+}
+
+func parseSeconds(s string) (time.Duration, error) {
+	seconds, err := strconv.ParseInt(s, 10, 64)
+	if err != nil && !errors.Is(err, strconv.ErrRange) {
+		return 0, errNotSeconds
+	}
+
+	if seconds < 0 {
+		return 0, errNegative
+	}
+
+	if seconds > maxSeconds {
+		return 0, errTooManySeconds
+	}
+
+	return time.Duration(seconds) * time.Second, nil
 }

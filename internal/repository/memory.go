@@ -1,8 +1,13 @@
 package repository
 
 import (
+	"cmp"
+	"errors"
 	"maps"
+	"slices"
 	"sync"
+
+	models "github.com/Kusaykin/go-telemetry/internal/model"
 )
 
 type MemStorage struct {
@@ -64,4 +69,55 @@ func (m *MemStorage) Counters() map[string]int64 {
 	defer m.mu.RUnlock()
 
 	return maps.Clone(m.counters)
+}
+
+func (m *MemStorage) Snapshot() []models.Metrics {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	metrics := make([]models.Metrics, 0, len(m.gauges)+len(m.counters))
+
+	for name, value := range m.gauges {
+		metrics = append(metrics, models.Metrics{ID: name, MType: models.Gauge, Value: &value})
+	}
+
+	for name, delta := range m.counters {
+		metrics = append(metrics, models.Metrics{ID: name, MType: models.Counter, Delta: &delta})
+	}
+
+	slices.SortFunc(metrics, func(a, b models.Metrics) int {
+		return cmp.Or(cmp.Compare(a.MType, b.MType), cmp.Compare(a.ID, b.ID))
+	})
+
+	return metrics
+}
+
+func (m *MemStorage) restore(metrics []models.Metrics) error {
+	gauges := make(map[string]float64)
+	counters := make(map[string]int64)
+
+	for _, metric := range metrics {
+		if metric.ID == "" {
+			return errors.New("metric id is empty")
+		}
+
+		if err := metric.Validate(); err != nil {
+			return err
+		}
+
+		switch metric.MType {
+		case models.Gauge:
+			gauges[metric.ID] = *metric.Value
+		case models.Counter:
+			counters[metric.ID] = *metric.Delta
+		}
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.gauges = gauges
+	m.counters = counters
+
+	return nil
 }
