@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"compress/gzip"
 	"io"
 	"math"
 	"net/http"
@@ -15,10 +16,11 @@ import (
 )
 
 type request struct {
-	method      string
-	path        string
-	contentType string
-	body        string
+	method          string
+	path            string
+	contentType     string
+	contentEncoding string
+	body            string
 }
 
 // testServer пишется из горутины HTTP-сервера, а читается из теста,
@@ -33,15 +35,27 @@ func newTestServer(t *testing.T, status int) (*testServer, *Client) {
 	ts := &testServer{status: status}
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, err := io.ReadAll(r.Body)
+		var reader io.Reader = r.Body
+		if r.Header.Get("Content-Encoding") == "gzip" {
+			zr, err := gzip.NewReader(r.Body)
+			if !assert.NoError(t, err) {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			defer zr.Close()
+			reader = zr
+		}
+
+		body, err := io.ReadAll(reader)
 		assert.NoError(t, err)
 
 		ts.mu.Lock()
 		ts.requests = append(ts.requests, request{
-			method:      r.Method,
-			path:        r.URL.Path,
-			contentType: r.Header.Get("Content-Type"),
-			body:        string(body),
+			method:          r.Method,
+			path:            r.URL.Path,
+			contentType:     r.Header.Get("Content-Type"),
+			contentEncoding: r.Header.Get("Content-Encoding"),
+			body:            string(body),
 		})
 		status := ts.status
 		ts.mu.Unlock()
@@ -101,6 +115,7 @@ func TestSendRequestFormat(t *testing.T) {
 			assert.Equal(t, http.MethodPost, requests[0].method)
 			assert.Equal(t, "/update", requests[0].path)
 			assert.Equal(t, "application/json", requests[0].contentType)
+			assert.Equal(t, "gzip", requests[0].contentEncoding)
 			assert.JSONEq(t, tt.want, requests[0].body)
 		})
 	}

@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"compress/gzip"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -75,8 +76,15 @@ func TestPollCountAccumulatesToPollsOnServer(t *testing.T) {
 	var total atomic.Int64
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		zr, err := gzip.NewReader(r.Body)
+		if !assert.NoError(t, err) {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		defer zr.Close()
+
 		var m models.Metrics
-		if !assert.NoError(t, easyjson.UnmarshalFromReader(r.Body, &m)) {
+		if !assert.NoError(t, easyjson.UnmarshalFromReader(zr, &m)) {
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}

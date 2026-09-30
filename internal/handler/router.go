@@ -14,6 +14,7 @@ func NewRouter(s Storage, log *zap.Logger) http.Handler {
 	r := chi.NewRouter()
 
 	r.Use(middleware.Logging(log))
+	r.Use(middleware.Gzip)
 
 	r.Get("/", h.Index)
 

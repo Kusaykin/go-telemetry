@@ -8,6 +8,7 @@ import (
 	"github.com/go-resty/resty/v2"
 	"github.com/mailru/easyjson"
 
+	"github.com/Kusaykin/go-telemetry/internal/compress"
 	models "github.com/Kusaykin/go-telemetry/internal/model"
 )
 
@@ -49,7 +50,15 @@ func (c *Client) Send(m models.Metrics) error {
 		return fmt.Errorf("send %s: %w", m.ID, err)
 	}
 
-	resp, err := c.rest.R().SetBody(body).Post("/update")
+	body, err = compress.Compress(body)
+	if err != nil {
+		return fmt.Errorf("send %s: %w", m.ID, err)
+	}
+
+	resp, err := c.rest.R().
+		SetHeader("Content-Encoding", "gzip").
+		SetBody(body).
+		Post("/update")
 	if err != nil {
 		return fmt.Errorf("send %s: %w", m.ID, err)
 	}
