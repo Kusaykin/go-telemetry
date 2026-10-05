@@ -315,7 +315,7 @@ func runInBackground(t *testing.T, s *FileStorage) (cancel func(), done <-chan s
 	finished := make(chan struct{})
 
 	go func() {
-		s.Run(ctx)
+		_ = s.Run(ctx)
 		close(finished)
 	}()
 
@@ -380,6 +380,25 @@ func TestFileStorageRunSkipsUnchanged(t *testing.T) {
 
 	cancel()
 	waitDone(t, done, "Run не завершился после отмены контекста")
+}
+
+func TestFileStorageRunReturnsSaveError(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "data")
+	require.NoError(t, os.Mkdir(dir, 0o755))
+
+	s := newFileStorage(t, filepath.Join(dir, "metrics.json"), 5*time.Millisecond, false)
+	require.NoError(t, os.RemoveAll(dir))
+	s.UpdateGauge("Alloc", 1)
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- s.Run(context.Background()) }()
+
+	select {
+	case err := <-errCh:
+		assert.Error(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("Run должен вернуть ошибку сохранения")
+	}
 }
 
 func TestFileStorageRunReturnsWithoutPeriodicMode(t *testing.T) {

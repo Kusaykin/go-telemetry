@@ -117,9 +117,9 @@ func (s *FileStorage) saveAndLog() {
 	}
 }
 
-func (s *FileStorage) Run(ctx context.Context) {
+func (s *FileStorage) Run(ctx context.Context) error {
 	if s.syncWrite() || s.path == "" {
-		return
+		return nil
 	}
 
 	ticker := time.NewTicker(s.interval)
@@ -128,10 +128,12 @@ func (s *FileStorage) Run(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			return
+			return nil
 		case <-ticker.C:
 			if s.dirty.Load() {
-				s.saveAndLog()
+				if err := s.Save(); err != nil {
+					return fmt.Errorf("save metrics to %s: %w", s.path, err)
+				}
 			}
 		}
 	}

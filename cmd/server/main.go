@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"sync"
 	"syscall"
 	"time"
 
@@ -16,6 +15,7 @@ import (
 	"github.com/Kusaykin/go-telemetry/internal/logger"
 	"github.com/Kusaykin/go-telemetry/internal/repository"
 	"go.uber.org/zap"
+	"golang.org/x/sync/errgroup"
 )
 
 const shutdownTimeout = 5 * time.Second
@@ -47,14 +47,6 @@ func run(ctx context.Context, cfg config.Server, log *zap.Logger) error {
 		return err
 	}
 
-	ctx, cancel := context.WithCancel(ctx)
-
-	var wg sync.WaitGroup
-	defer wg.Wait()
-	defer cancel()
-
-	wg.Go(func() { store.Run(ctx) })
-
 	log.Info("starting server",
 		zap.String("address", cfg.Address),
 		zap.Duration("store_interval", cfg.StoreInterval),
@@ -64,26 +56,30 @@ func run(ctx context.Context, cfg config.Server, log *zap.Logger) error {
 
 	srv := newServer(cfg, store, log)
 
-	serveErr := make(chan error, 1)
-	go func() { serveErr <- srv.ListenAndServe() }()
+	g, gctx := errgroup.WithContext(ctx)
 
-	select {
-	case err := <-serveErr:
-		return errors.Join(err, store.Save())
-	case <-ctx.Done():
-	}
+	g.Go(func() error {
+		if err := srv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
+			return err
+		}
+		return nil
+	})
 
-	log.Info("shutting down server")
+	g.Go(func() error {
+		return store.Run(gctx)
+	})
 
-	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), shutdownTimeout)
-	defer cancelShutdown()
+	g.Go(func() error {
+		<-gctx.Done()
+		log.Info("shutting down server")
 
-	shutdownErr := srv.Shutdown(shutdownCtx)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+		defer cancel()
 
-	cancel()
-	wg.Wait()
+		return srv.Shutdown(shutdownCtx)
+	})
 
-	return errors.Join(shutdownErr, store.Save())
+	return errors.Join(g.Wait(), store.Save())
 }
 
 func newServer(cfg config.Server, store handler.Storage, log *zap.Logger) *http.Server {
