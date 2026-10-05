@@ -1,8 +1,11 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/Kusaykin/go-telemetry/internal/agent"
 	"github.com/Kusaykin/go-telemetry/internal/config"
@@ -22,5 +25,8 @@ func main() {
 	}
 	defer log.Sync()
 
-	agent.New(cfg, log).Run()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	agent.New(cfg, log).Run(ctx)
 }

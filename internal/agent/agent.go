@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"time"
 
 	"github.com/Kusaykin/go-telemetry/internal/config"
@@ -25,16 +26,24 @@ func New(cfg config.Agent, log *zap.Logger) *Agent {
 	}
 }
 
-func (a *Agent) Run() {
+func (a *Agent) Run(ctx context.Context) {
 	a.log.Info("starting agent",
 		zap.String("address", a.cfg.Address),
 		zap.Duration("poll_interval", a.cfg.PollInterval),
 		zap.Duration("report_interval", a.cfg.ReportInterval),
 	)
 
+	ticker := time.NewTicker(a.cfg.PollInterval)
+	defer ticker.Stop()
+
 	for {
-		time.Sleep(a.cfg.PollInterval)
-		a.tick()
+		select {
+		case <-ctx.Done():
+			a.log.Info("stopping agent")
+			return
+		case <-ticker.C:
+			a.tick()
+		}
 	}
 }
 
