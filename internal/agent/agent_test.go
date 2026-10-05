@@ -135,7 +135,7 @@ func TestPollCountSurvivesFailedReport(t *testing.T) {
 
 func TestAgentLogsReport(t *testing.T) {
 	_, client := newTestServer(t, http.StatusOK)
-	core, logs := observer.New(zapcore.InfoLevel)
+	core, logs := observer.New(zapcore.DebugLevel)
 
 	a := New(config.DefaultAgent(), zap.New(core))
 	a.client = client
@@ -147,13 +147,14 @@ func TestAgentLogsReport(t *testing.T) {
 	reports := logs.FilterMessage("report").All()
 	require.Len(t, reports, 1)
 	assert.Equal(t, int64(metricsCount), reports[0].ContextMap()["metrics"])
+	assert.Equal(t, zapcore.InfoLevel, reports[0].Level)
 
 	metrics := logs.FilterMessage("metric")
 	assert.Equal(t, metricsCount, metrics.Len())
 	assert.Equal(t, 1, metrics.FilterField(zap.String("id", PollCountName)).Len())
 	assert.Equal(t, 1, metrics.FilterField(zap.String("id", RandomValueName)).Len())
 	for _, e := range metrics.All() {
-		assert.Equal(t, zapcore.InfoLevel, e.Level)
+		assert.Equal(t, zapcore.DebugLevel, e.Level)
 	}
 }
 

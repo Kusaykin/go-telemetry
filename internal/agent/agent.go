@@ -82,7 +82,7 @@ func (a *Agent) logReport(snapshot []models.Metrics) {
 			)
 			continue
 		}
-		a.log.Info("metric",
+		a.log.Debug("metric",
 			zap.String("type", m.MType),
 			zap.String("id", m.ID),
 			zap.String("value", value),
