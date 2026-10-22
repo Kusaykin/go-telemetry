@@ -72,7 +72,7 @@ func TestRouterGzip(t *testing.T) {
 		req.Header.Set("Accept-Encoding", "gzip")
 		rec := httptest.NewRecorder()
 
-		handler.NewRouter(store, zap.NewNop()).ServeHTTP(rec, req)
+		handler.NewRouter(store, nil, zap.NewNop()).ServeHTTP(rec, req)
 
 		require.Equal(t, http.StatusOK, rec.Code)
 		assert.Equal(t, int64(5), store.counters["PollCount"])
@@ -92,7 +92,7 @@ func TestRouterGzip(t *testing.T) {
 		req.Header.Set("Accept-Encoding", "gzip")
 		rec := httptest.NewRecorder()
 
-		handler.NewRouter(store, zap.NewNop()).ServeHTTP(rec, req)
+		handler.NewRouter(store, nil, zap.NewNop()).ServeHTTP(rec, req)
 
 		require.Equal(t, http.StatusOK, rec.Code)
 		assert.Equal(t, "gzip", rec.Header().Get("Content-Encoding"))
@@ -111,7 +111,7 @@ func TestRouterGzip(t *testing.T) {
 		req.Header.Set("Content-Encoding", "gzip")
 		rec := httptest.NewRecorder()
 
-		handler.NewRouter(newFakeStorage(), zap.NewNop()).ServeHTTP(rec, req)
+		handler.NewRouter(newFakeStorage(), nil, zap.NewNop()).ServeHTTP(rec, req)
 
 		assert.Equal(t, http.StatusRequestEntityTooLarge, rec.Code)
 	})

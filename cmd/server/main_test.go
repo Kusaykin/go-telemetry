@@ -19,7 +19,7 @@ import (
 )
 
 func TestNewServer(t *testing.T) {
-	srv := newServer(config.Server{Address: "127.0.0.1:9090"}, repository.NewMemStorage(), zap.NewNop())
+	srv := newServer(config.Server{Address: "127.0.0.1:9090"}, repository.NewMemStorage(), nil, zap.NewNop())
 
 	assert.Equal(t, "127.0.0.1:9090", srv.Addr)
 	assert.NotNil(t, srv.Handler)
@@ -31,7 +31,7 @@ func startServer(t *testing.T, store handler.Storage) string {
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 
-	srv := newServer(config.DefaultServer(), store, zap.NewNop())
+	srv := newServer(config.DefaultServer(), store, nil, zap.NewNop())
 	go srv.Serve(l)
 
 	t.Cleanup(func() {

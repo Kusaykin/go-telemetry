@@ -8,8 +8,8 @@ import (
 	"go.uber.org/zap"
 )
 
-func NewRouter(s Storage, log *zap.Logger) http.Handler {
-	h := New(s)
+func NewRouter(s Storage, db Pinger, log *zap.Logger) http.Handler {
+	h := New(s, db, log)
 
 	r := chi.NewRouter()
 
@@ -17,6 +17,7 @@ func NewRouter(s Storage, log *zap.Logger) http.Handler {
 	r.Use(middleware.Gzip)
 
 	r.Get("/", h.Index)
+	r.Get("/ping", h.Ping)
 
 	r.Route("/update", func(r chi.Router) {
 		r.Post("/", h.UpdateJSON)

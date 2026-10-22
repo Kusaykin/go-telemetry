@@ -1,5 +1,7 @@
 package handler
 
+import "go.uber.org/zap"
+
 type Storage interface {
 	UpdateGauge(name string, value float64)
 	UpdateCounter(name string, delta int64) int64
@@ -11,8 +13,11 @@ type Storage interface {
 
 type Handler struct {
 	store Storage
+	db    Pinger
+	log   *zap.Logger
 }
 
-func New(store Storage) *Handler {
-	return &Handler{store: store}
+// New создаёт обработчики. db может быть nil — тогда /ping отвечает 500.
+func New(store Storage, db Pinger, log *zap.Logger) *Handler {
+	return &Handler{store: store, db: db, log: log}
 }

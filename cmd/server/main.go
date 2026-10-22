@@ -47,14 +47,26 @@ func run(ctx context.Context, cfg config.Server, log *zap.Logger) error {
 		return err
 	}
 
+	var db handler.Pinger
+	if cfg.DatabaseDSN != "" {
+		pg, err := repository.NewPostgres(cfg.DatabaseDSN)
+		if err != nil {
+			return err
+		}
+		defer pg.Close()
+
+		db = pg
+	}
+
 	log.Info("starting server",
 		zap.String("address", cfg.Address),
 		zap.Duration("store_interval", cfg.StoreInterval),
 		zap.String("file_storage_path", cfg.FileStoragePath),
 		zap.Bool("restore", cfg.Restore),
+		zap.Bool("database", db != nil),
 	)
 
-	srv := newServer(cfg, store, log)
+	srv := newServer(cfg, store, db, log)
 
 	g, gctx := errgroup.WithContext(ctx)
 
@@ -82,9 +94,9 @@ func run(ctx context.Context, cfg config.Server, log *zap.Logger) error {
 	return errors.Join(g.Wait(), store.Save())
 }
 
-func newServer(cfg config.Server, store handler.Storage, log *zap.Logger) *http.Server {
+func newServer(cfg config.Server, store handler.Storage, db handler.Pinger, log *zap.Logger) *http.Server {
 	return &http.Server{
 		Addr:    cfg.Address,
-		Handler: handler.NewRouter(store, log),
+		Handler: handler.NewRouter(store, db, log),
 	}
 }

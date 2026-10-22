@@ -13,6 +13,7 @@ const (
 	envStoreInterval   = "STORE_INTERVAL"
 	envFileStoragePath = "FILE_STORAGE_PATH"
 	envRestore         = "RESTORE"
+	envDatabaseDSN     = "DATABASE_DSN"
 )
 
 type Server struct {
@@ -20,6 +21,7 @@ type Server struct {
 	StoreInterval   time.Duration
 	FileStoragePath string
 	Restore         bool
+	DatabaseDSN     string
 }
 
 func DefaultServer() Server {
@@ -41,6 +43,8 @@ func LoadServer(args []string, lookup LookupEnv, errOut io.Writer) (Server, erro
 	fs.stringVar(&cfg.FileStoragePath, "f", envFileStoragePath,
 		"`путь` до файла с сохранёнными метриками (пусто — не сохранять)")
 	fs.boolVar(&cfg.Restore, "r", envRestore, "загружать сохранённые метрики из файла при старте")
+	fs.stringVar(&cfg.DatabaseDSN, "d", envDatabaseDSN,
+		"`строка` подключения к PostgreSQL (пусто — БД не используется)")
 
 	if err := fs.parse(args, lookup); err != nil {
 		return Server{}, err
