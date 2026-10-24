@@ -11,10 +11,10 @@ import (
 
 func TestIndexListsAllMetrics(t *testing.T) {
 	store := newFakeStorage()
-	store.UpdateGauge("Alloc", 12.5)
-	store.UpdateGauge("Sys", 1234567890)
-	store.UpdateCounter("PollCount", 5)
-	store.UpdateCounter("PollCount", 10)
+	store.gauges["Alloc"] = 12.5
+	store.gauges["Sys"] = 1234567890
+	store.counters["PollCount"] += 5
+	store.counters["PollCount"] += 10
 
 	rec := do(store, http.MethodGet, "/")
 
@@ -37,9 +37,9 @@ func TestIndexEmptyStorage(t *testing.T) {
 
 func TestIndexSortsNames(t *testing.T) {
 	store := newFakeStorage()
-	store.UpdateGauge("Sys", 1)
-	store.UpdateGauge("Alloc", 2)
-	store.UpdateGauge("Mallocs", 3)
+	store.gauges["Sys"] = 1
+	store.gauges["Alloc"] = 2
+	store.gauges["Mallocs"] = 3
 
 	body := do(store, http.MethodGet, "/").Body.String()
 

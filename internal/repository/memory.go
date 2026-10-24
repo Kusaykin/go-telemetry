@@ -2,6 +2,7 @@ package repository
 
 import (
 	"cmp"
+	"context"
 	"errors"
 	"maps"
 	"slices"
@@ -23,52 +24,54 @@ func NewMemStorage() *MemStorage {
 	}
 }
 
-func (m *MemStorage) UpdateGauge(name string, value float64) {
+func (m *MemStorage) UpdateGauge(_ context.Context, name string, value float64) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	m.gauges[name] = value
+
+	return nil
 }
 
-func (m *MemStorage) UpdateCounter(name string, delta int64) int64 {
+func (m *MemStorage) UpdateCounter(_ context.Context, name string, delta int64) (int64, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	m.counters[name] += delta
 
-	return m.counters[name]
+	return m.counters[name], nil
 }
 
-func (m *MemStorage) Gauge(name string) (float64, bool) {
+func (m *MemStorage) Gauge(_ context.Context, name string) (float64, bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	value, ok := m.gauges[name]
 
-	return value, ok
+	return value, ok, nil
 }
 
-func (m *MemStorage) Counter(name string) (int64, bool) {
+func (m *MemStorage) Counter(_ context.Context, name string) (int64, bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	delta, ok := m.counters[name]
 
-	return delta, ok
+	return delta, ok, nil
 }
 
-func (m *MemStorage) Gauges() map[string]float64 {
+func (m *MemStorage) Gauges(context.Context) (map[string]float64, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	return maps.Clone(m.gauges)
+	return maps.Clone(m.gauges), nil
 }
 
-func (m *MemStorage) Counters() map[string]int64 {
+func (m *MemStorage) Counters(context.Context) (map[string]int64, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	return maps.Clone(m.counters)
+	return maps.Clone(m.counters), nil
 }
 
 func (m *MemStorage) Snapshot() []models.Metrics {

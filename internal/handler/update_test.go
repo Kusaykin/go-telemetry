@@ -1,6 +1,7 @@
 package handler_test
 
 import (
+	"context"
 	"maps"
 	"net/http"
 	"net/http/httptest"
@@ -16,6 +17,7 @@ import (
 type fakeStorage struct {
 	gauges   map[string]float64
 	counters map[string]int64
+	err      error // если задана, её возвращает любой метод
 }
 
 func newFakeStorage() *fakeStorage {
@@ -25,34 +27,44 @@ func newFakeStorage() *fakeStorage {
 	}
 }
 
-func (f *fakeStorage) UpdateGauge(name string, value float64) {
+func (f *fakeStorage) UpdateGauge(_ context.Context, name string, value float64) error {
+	if f.err != nil {
+		return f.err
+	}
+
 	f.gauges[name] = value
+
+	return nil
 }
 
-func (f *fakeStorage) UpdateCounter(name string, delta int64) int64 {
+func (f *fakeStorage) UpdateCounter(_ context.Context, name string, delta int64) (int64, error) {
+	if f.err != nil {
+		return 0, f.err
+	}
+
 	f.counters[name] += delta
 
-	return f.counters[name]
+	return f.counters[name], nil
 }
 
-func (f *fakeStorage) Gauge(name string) (float64, bool) {
+func (f *fakeStorage) Gauge(_ context.Context, name string) (float64, bool, error) {
 	value, ok := f.gauges[name]
 
-	return value, ok
+	return value, ok, f.err
 }
 
-func (f *fakeStorage) Counter(name string) (int64, bool) {
+func (f *fakeStorage) Counter(_ context.Context, name string) (int64, bool, error) {
 	delta, ok := f.counters[name]
 
-	return delta, ok
+	return delta, ok, f.err
 }
 
-func (f *fakeStorage) Gauges() map[string]float64 {
-	return maps.Clone(f.gauges)
+func (f *fakeStorage) Gauges(context.Context) (map[string]float64, error) {
+	return maps.Clone(f.gauges), f.err
 }
 
-func (f *fakeStorage) Counters() map[string]int64 {
-	return maps.Clone(f.counters)
+func (f *fakeStorage) Counters(context.Context) (map[string]int64, error) {
+	return maps.Clone(f.counters), f.err
 }
 
 func do(store handler.Storage, method, path string) *httptest.ResponseRecorder {

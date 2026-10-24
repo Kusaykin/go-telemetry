@@ -22,7 +22,7 @@ func TestValueGauge(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			store := newFakeStorage()
-			store.UpdateGauge("Alloc", tt.value)
+			store.gauges["Alloc"] = tt.value
 
 			rec := do(store, http.MethodGet, "/value/gauge/Alloc")
 
@@ -35,8 +35,8 @@ func TestValueGauge(t *testing.T) {
 
 func TestValueCounterIsAccumulated(t *testing.T) {
 	store := newFakeStorage()
-	store.UpdateCounter("PollCount", 5)
-	store.UpdateCounter("PollCount", 10)
+	store.counters["PollCount"] += 5
+	store.counters["PollCount"] += 10
 
 	rec := do(store, http.MethodGet, "/value/counter/PollCount")
 
@@ -46,8 +46,8 @@ func TestValueCounterIsAccumulated(t *testing.T) {
 
 func TestValueZeroIsFound(t *testing.T) {
 	store := newFakeStorage()
-	store.UpdateGauge("Zero", 0)
-	store.UpdateCounter("ZeroCount", 0)
+	store.gauges["Zero"] = 0
+	store.counters["ZeroCount"] += 0
 
 	rec := do(store, http.MethodGet, "/value/gauge/Zero")
 	require.Equal(t, http.StatusOK, rec.Code)
@@ -72,8 +72,8 @@ func TestValueNotFound(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			store := newFakeStorage()
-			store.UpdateGauge("Alloc", 1)
-			store.UpdateCounter("PollCount", 1)
+			store.gauges["Alloc"] = 1
+			store.counters["PollCount"] += 1
 
 			rec := do(store, http.MethodGet, tt.path)
 
@@ -95,8 +95,8 @@ func TestUpdateThenValue(t *testing.T) {
 
 func TestValueJSON(t *testing.T) {
 	store := newFakeStorage()
-	store.UpdateGauge("LastGC", 1744184459)
-	store.UpdateCounter("PollCount", 15)
+	store.gauges["LastGC"] = 1744184459
+	store.counters["PollCount"] += 15
 
 	tests := []struct {
 		name string
@@ -121,7 +121,7 @@ func TestValueJSON(t *testing.T) {
 
 func TestValueJSONErrors(t *testing.T) {
 	store := newFakeStorage()
-	store.UpdateGauge("Alloc", 1)
+	store.gauges["Alloc"] = 1
 
 	tests := []struct {
 		name string

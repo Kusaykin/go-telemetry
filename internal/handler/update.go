@@ -6,6 +6,7 @@ import (
 	"strconv"
 
 	"github.com/go-chi/chi/v5"
+	"go.uber.org/zap"
 
 	models "github.com/Kusaykin/go-telemetry/internal/model"
 )
@@ -24,14 +25,20 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
-		h.store.UpdateGauge(name, value)
+		if err := h.store.UpdateGauge(r.Context(), name, value); err != nil {
+			h.storageError(w, r, err)
+			return
+		}
 	case models.Counter:
 		delta, err := strconv.ParseInt(chi.URLParam(r, "value"), 10, 64)
 		if err != nil {
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
-		h.store.UpdateCounter(name, delta)
+		if _, err := h.store.UpdateCounter(r.Context(), name, delta); err != nil {
+			h.storageError(w, r, err)
+			return
+		}
 	default:
 		w.WriteHeader(http.StatusBadRequest)
 		return
@@ -60,13 +67,30 @@ func (h *Handler) UpdateJSON(w http.ResponseWriter, r *http.Request) {
 
 	switch m.MType {
 	case models.Gauge:
-		h.store.UpdateGauge(m.ID, *m.Value)
+		if err := h.store.UpdateGauge(r.Context(), m.ID, *m.Value); err != nil {
+			h.storageError(w, r, err)
+			return
+		}
 		m.Delta = nil
 	case models.Counter:
-		delta := h.store.UpdateCounter(m.ID, *m.Delta)
+		delta, err := h.store.UpdateCounter(r.Context(), m.ID, *m.Delta)
+		if err != nil {
+			h.storageError(w, r, err)
+			return
+		}
 		m.Delta = &delta
 		m.Value = nil
 	}
 
 	writeJSON(w, m)
+}
+
+func (h *Handler) storageError(w http.ResponseWriter, r *http.Request, err error) {
+	if r.Context().Err() != nil {
+		h.log.Debug("storage: request canceled", zap.Error(err))
+	} else {
+		h.log.Error("storage", zap.Error(err))
+	}
+
+	w.WriteHeader(http.StatusInternalServerError)
 }

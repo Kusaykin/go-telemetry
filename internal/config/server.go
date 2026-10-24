@@ -44,7 +44,7 @@ func LoadServer(args []string, lookup LookupEnv, errOut io.Writer) (Server, erro
 		"`путь` до файла с сохранёнными метриками (пусто — не сохранять)")
 	fs.boolVar(&cfg.Restore, "r", envRestore, "загружать сохранённые метрики из файла при старте")
 	fs.stringVar(&cfg.DatabaseDSN, "d", envDatabaseDSN,
-		"`строка` подключения к PostgreSQL (пусто — БД не используется)")
+		"`строка` подключения к PostgreSQL для хранения метрик (пусто — файл или память)")
 
 	if err := fs.parse(args, lookup); err != nil {
 		return Server{}, err

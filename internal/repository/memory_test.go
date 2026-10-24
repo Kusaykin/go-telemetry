@@ -12,84 +12,85 @@ import (
 func TestUpdateGauge(t *testing.T) {
 	m := NewMemStorage()
 
-	m.UpdateGauge("Alloc", 1.5)
+	mustUpdateGauge(t, m, "Alloc", 1.5)
 	assert.Equal(t, 1.5, m.gauges["Alloc"])
 
-	m.UpdateGauge("Alloc", -2.25)
+	mustUpdateGauge(t, m, "Alloc", -2.25)
 	assert.Equal(t, -2.25, m.gauges["Alloc"])
 }
 
 func TestUpdateCounter(t *testing.T) {
 	m := NewMemStorage()
 
-	assert.Equal(t, int64(5), m.UpdateCounter("PollCount", 5))
+	assert.Equal(t, int64(5), mustUpdateCounter(t, m, "PollCount", 5))
 	assert.Equal(t, int64(5), m.counters["PollCount"])
 
-	assert.Equal(t, int64(15), m.UpdateCounter("PollCount", 10))
+	assert.Equal(t, int64(15), mustUpdateCounter(t, m, "PollCount", 10))
 	assert.Equal(t, int64(15), m.counters["PollCount"])
 }
 
 func TestGauge(t *testing.T) {
 	m := NewMemStorage()
-	m.UpdateGauge("Alloc", 12.5)
+	mustUpdateGauge(t, m, "Alloc", 12.5)
 
-	value, ok := m.Gauge("Alloc")
+	value, ok := mustGauge(t, m, "Alloc")
 	assert.True(t, ok)
 	assert.Equal(t, 12.5, value)
 
-	_, ok = m.Gauge("Unknown")
+	_, ok = mustGauge(t, m, "Unknown")
 	assert.False(t, ok)
 }
 
 func TestCounter(t *testing.T) {
 	m := NewMemStorage()
-	m.UpdateCounter("PollCount", 5)
-	m.UpdateCounter("PollCount", 10)
+	mustUpdateCounter(t, m, "PollCount", 5)
+	mustUpdateCounter(t, m, "PollCount", 10)
 
-	delta, ok := m.Counter("PollCount")
+	delta, ok := mustCounter(t, m, "PollCount")
 	assert.True(t, ok)
 	assert.Equal(t, int64(15), delta)
 
-	_, ok = m.Counter("Unknown")
+	_, ok = mustCounter(t, m, "Unknown")
 	assert.False(t, ok)
 }
 
 func TestZeroValueIsFound(t *testing.T) {
 	m := NewMemStorage()
-	m.UpdateGauge("Zero", 0)
-	m.UpdateCounter("ZeroCount", 0)
+	mustUpdateGauge(t, m, "Zero", 0)
+	mustUpdateCounter(t, m, "ZeroCount", 0)
 
-	_, ok := m.Gauge("Zero")
+	_, ok := mustGauge(t, m, "Zero")
 	assert.True(t, ok)
 
-	_, ok = m.Counter("ZeroCount")
+	_, ok = mustCounter(t, m, "ZeroCount")
 	assert.True(t, ok)
 }
 
 func TestSnapshotsAreCopies(t *testing.T) {
 	m := NewMemStorage()
-	m.UpdateGauge("Alloc", 1)
-	m.UpdateCounter("PollCount", 1)
+	mustUpdateGauge(t, m, "Alloc", 1)
+	mustUpdateCounter(t, m, "PollCount", 1)
 
-	gauges := m.Gauges()
+	gauges := mustGauges(t, m)
 	assert.Equal(t, map[string]float64{"Alloc": 1}, gauges)
 	gauges["Alloc"] = 100
 	delete(gauges, "Alloc")
 
-	counters := m.Counters()
+	counters := mustCounters(t, m)
 	assert.Equal(t, map[string]int64{"PollCount": 1}, counters)
 	counters["PollCount"] = 100
 
-	value, ok := m.Gauge("Alloc")
+	value, ok := mustGauge(t, m, "Alloc")
 	assert.True(t, ok)
 	assert.Equal(t, float64(1), value)
 
-	delta, ok := m.Counter("PollCount")
+	delta, ok := mustCounter(t, m, "PollCount")
 	assert.True(t, ok)
 	assert.Equal(t, int64(1), delta)
 }
 
 func TestConcurrentAccess(t *testing.T) {
+	ctx := t.Context()
 	m := NewMemStorage()
 
 	var wg sync.WaitGroup
@@ -97,29 +98,33 @@ func TestConcurrentAccess(t *testing.T) {
 	for i := range 50 {
 		wg.Add(3)
 
-		go func() { defer wg.Done(); m.UpdateGauge("Alloc", float64(i)) }()
-		go func() { defer wg.Done(); m.UpdateCounter("PollCount", 1) }()
+		go func() { defer wg.Done(); assert.NoError(t, m.UpdateGauge(ctx, "Alloc", float64(i))) }()
 		go func() {
 			defer wg.Done()
-			m.Gauge("Alloc")
-			m.Counter("PollCount")
-			m.Gauges()
-			m.Counters()
+			_, err := m.UpdateCounter(ctx, "PollCount", 1)
+			assert.NoError(t, err)
+		}()
+		go func() {
+			defer wg.Done()
+			_, _, _ = m.Gauge(ctx, "Alloc")
+			_, _, _ = m.Counter(ctx, "PollCount")
+			_, _ = m.Gauges(ctx)
+			_, _ = m.Counters(ctx)
 		}()
 	}
 
 	wg.Wait()
 
-	delta, ok := m.Counter("PollCount")
+	delta, ok := mustCounter(t, m, "PollCount")
 	assert.True(t, ok)
 	assert.Equal(t, int64(50), delta)
 }
 
 func TestSnapshotSortedAndIndependent(t *testing.T) {
 	m := NewMemStorage()
-	m.UpdateGauge("b", 2)
-	m.UpdateGauge("a", 1)
-	m.UpdateCounter("c", 3)
+	mustUpdateGauge(t, m, "b", 2)
+	mustUpdateGauge(t, m, "a", 1)
+	mustUpdateCounter(t, m, "c", 3)
 
 	snapshot := m.Snapshot()
 
@@ -130,32 +135,32 @@ func TestSnapshotSortedAndIndependent(t *testing.T) {
 	assert.Equal(t, []string{"counter/c", "gauge/a", "gauge/b"}, got)
 
 	*snapshot[1].Value = 100
-	value, _ := m.Gauge("a")
+	value, _ := mustGauge(t, m, "a")
 	assert.Equal(t, 1.0, value, "изменение снимка не должно менять хранилище")
 }
 
 func TestRestoreReplacesContent(t *testing.T) {
 	m := NewMemStorage()
-	m.UpdateGauge("Old", 1)
+	mustUpdateGauge(t, m, "Old", 1)
 
 	src := NewMemStorage()
-	src.UpdateGauge("Alloc", 12.5)
-	src.UpdateCounter("PollCount", 5)
+	mustUpdateGauge(t, src, "Alloc", 12.5)
+	mustUpdateCounter(t, src, "PollCount", 5)
 
 	assert.NoError(t, m.restore(src.Snapshot()))
-	assert.Equal(t, map[string]float64{"Alloc": 12.5}, m.Gauges())
-	assert.Equal(t, map[string]int64{"PollCount": 5}, m.Counters())
+	assert.Equal(t, map[string]float64{"Alloc": 12.5}, mustGauges(t, m))
+	assert.Equal(t, map[string]int64{"PollCount": 5}, mustCounters(t, m))
 }
 
 func TestRestoreInvalidKeepsContent(t *testing.T) {
 	m := NewMemStorage()
-	m.UpdateGauge("Alloc", 1)
+	mustUpdateGauge(t, m, "Alloc", 1)
 
 	src := NewMemStorage()
-	src.UpdateGauge("Good", 2)
+	mustUpdateGauge(t, src, "Good", 2)
 	metrics := src.Snapshot()
 	metrics = append(metrics, models.Metrics{ID: "Bad", MType: models.Gauge})
 
 	assert.Error(t, m.restore(metrics))
-	assert.Equal(t, map[string]float64{"Alloc": 1}, m.Gauges())
+	assert.Equal(t, map[string]float64{"Alloc": 1}, mustGauges(t, m))
 }
