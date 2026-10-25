@@ -3,7 +3,6 @@ package agent
 import (
 	"compress/gzip"
 	"io"
-	"math"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -92,100 +91,47 @@ func counter(id string, delta int64) models.Metrics {
 	return models.Metrics{ID: id, MType: models.Counter, Delta: &delta}
 }
 
-func TestSendRequestFormat(t *testing.T) {
-	tests := []struct {
-		name   string
-		metric models.Metrics
-		want   string
-	}{
-		{"gauge", gauge("Alloc", 12.5), `{"id":"Alloc","type":"gauge","value":12.5}`},
-		{"counter", counter("PollCount", 527), `{"id":"PollCount","type":"counter","delta":527}`},
-		{"большое целое gauge", gauge("Sys", 1234567890), `{"id":"Sys","type":"gauge","value":1234567890}`},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			ts, client := newTestServer(t, http.StatusOK)
-
-			err := client.Send(tt.metric)
-			require.NoError(t, err)
-
-			requests := ts.Requests()
-			require.Len(t, requests, 1)
-			assert.Equal(t, http.MethodPost, requests[0].method)
-			assert.Equal(t, "/update", requests[0].path)
-			assert.Equal(t, "application/json", requests[0].contentType)
-			assert.Equal(t, "gzip", requests[0].contentEncoding)
-			assert.JSONEq(t, tt.want, requests[0].body)
-		})
-	}
-}
-
-func TestSendServerError(t *testing.T) {
-	ts, client := newTestServer(t, http.StatusInternalServerError)
-
-	err := client.Send(gauge("Alloc", 1))
-
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "500")
-	assert.Len(t, ts.Requests(), 1)
-}
-
-func TestSendInvalidMetric(t *testing.T) {
-	tests := []struct {
-		name   string
-		metric models.Metrics
-	}{
-		{"gauge без значения", models.Metrics{ID: "Alloc", MType: models.Gauge}},
-		{"неизвестный тип", models.Metrics{ID: "Alloc", MType: "histogram"}},
-		{"gauge NaN", gauge("Alloc", math.NaN())},
-		{"gauge +Inf", gauge("Alloc", math.Inf(1))},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			ts, client := newTestServer(t, http.StatusOK)
-
-			err := client.Send(tt.metric)
-
-			assert.Error(t, err)
-			assert.Empty(t, ts.Requests())
-		})
-	}
-}
-
-func TestSendAll(t *testing.T) {
+func TestSendBatch(t *testing.T) {
 	ts, client := newTestServer(t, http.StatusOK)
 
 	metrics := []models.Metrics{
 		gauge("Alloc", 1),
 		gauge("Sys", 2),
+		gauge("TotalAlloc", 1234567890),
 		counter("PollCount", 3),
 	}
 
-	err := client.SendAll(metrics)
+	err := client.SendBatch(metrics)
 	require.NoError(t, err)
 
 	requests := ts.Requests()
-	require.Len(t, requests, 3)
-	assert.JSONEq(t, `{"id":"Alloc","type":"gauge","value":1}`, requests[0].body)
-	assert.JSONEq(t, `{"id":"Sys","type":"gauge","value":2}`, requests[1].body)
-	assert.JSONEq(t, `{"id":"PollCount","type":"counter","delta":3}`, requests[2].body)
+	require.Len(t, requests, 1)
+	assert.Equal(t, http.MethodPost, requests[0].method)
+	assert.Equal(t, "/updates/", requests[0].path)
+	assert.Equal(t, "application/json", requests[0].contentType)
+	assert.Equal(t, "gzip", requests[0].contentEncoding)
+	assert.JSONEq(t, `[
+		{"id":"Alloc","type":"gauge","value":1},
+		{"id":"Sys","type":"gauge","value":2},
+		{"id":"TotalAlloc","type":"gauge","value":1234567890},
+		{"id":"PollCount","type":"counter","delta":3}
+	]`, requests[0].body)
 }
 
-func TestSendAllStopsOnFirstError(t *testing.T) {
+func TestSendBatchEmpty(t *testing.T) {
+	ts, client := newTestServer(t, http.StatusOK)
+
+	require.NoError(t, client.SendBatch(nil))
+	require.NoError(t, client.SendBatch([]models.Metrics{}))
+	assert.Empty(t, ts.Requests())
+}
+
+func TestSendBatchServerError(t *testing.T) {
 	ts, client := newTestServer(t, http.StatusInternalServerError)
 
-	metrics := []models.Metrics{
-		gauge("Alloc", 1),
-		gauge("Sys", 2),
-		counter("PollCount", 3),
-	}
+	err := client.SendBatch([]models.Metrics{gauge("Alloc", 1)})
 
-	err := client.SendAll(metrics)
 	require.Error(t, err)
-
-	requests := ts.Requests()
-	require.Len(t, requests, 1)
-	assert.JSONEq(t, `{"id":"Alloc","type":"gauge","value":1}`, requests[0].body)
+	assert.Contains(t, err.Error(), "500")
+	assert.Len(t, ts.Requests(), 1)
 }

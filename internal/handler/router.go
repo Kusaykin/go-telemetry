@@ -25,6 +25,8 @@ func NewRouter(s Storage, db Pinger, log *zap.Logger) http.Handler {
 		r.Post("/{type}/{name}/", h.Update)
 	})
 
+	r.Post("/updates/", h.Updates)
+
 	r.Route("/value", func(r chi.Router) {
 		r.Post("/", h.ValueJSON)
 		r.Get("/{type}/{name}", h.Value)

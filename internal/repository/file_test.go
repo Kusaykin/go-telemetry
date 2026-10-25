@@ -11,6 +11,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
+
+	models "github.com/Kusaykin/go-telemetry/internal/model"
 )
 
 const (
@@ -191,6 +193,28 @@ func TestFileStorageSyncWrite(t *testing.T) {
 
 	assert.Equal(t, int64(7), mustUpdateCounter(t, s, "PollCount", 7))
 	assert.Equal(t, map[string]int64{"PollCount": 7}, mustCounters(t, newFileStorage(t, path, periodicInterval, true)))
+}
+
+func TestFileStorageUpdateBatch(t *testing.T) {
+	checkUpdateBatch(t, newFileStorage(t, tempPath(t), periodicInterval, false))
+}
+
+func TestFileStorageUpdateBatchOverflow(t *testing.T) {
+	checkUpdateBatchOverflow(t, newFileStorage(t, tempPath(t), periodicInterval, false))
+}
+
+func TestFileStorageUpdateBatchSyncWrite(t *testing.T) {
+	path := tempPath(t)
+	s := newFileStorage(t, path, syncInterval, false)
+
+	require.NoError(t, s.UpdateBatch(t.Context(), []models.Metrics{
+		gaugeMetric("Alloc", 1.5),
+		counterMetric("PollCount", 7),
+	}))
+
+	restored := newFileStorage(t, path, periodicInterval, true)
+	assert.Equal(t, map[string]float64{"Alloc": 1.5}, mustGauges(t, restored))
+	assert.Equal(t, map[string]int64{"PollCount": 7}, mustCounters(t, restored))
 }
 
 func TestFileStorageWithoutSyncWriteDoesNotWrite(t *testing.T) {

@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/Kusaykin/go-telemetry/internal/handler"
+	models "github.com/Kusaykin/go-telemetry/internal/model"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -45,6 +46,24 @@ func (f *fakeStorage) UpdateCounter(_ context.Context, name string, delta int64)
 	f.counters[name] += delta
 
 	return f.counters[name], nil
+}
+
+func (f *fakeStorage) UpdateBatch(_ context.Context, metrics []models.Metrics) error {
+	if f.err != nil {
+		return f.err
+	}
+
+	gauges, counters, err := models.Collapse(metrics)
+	if err != nil {
+		return err
+	}
+
+	maps.Copy(f.gauges, gauges)
+	for name, delta := range counters {
+		f.counters[name] += delta
+	}
+
+	return nil
 }
 
 func (f *fakeStorage) Gauge(_ context.Context, name string) (float64, bool, error) {

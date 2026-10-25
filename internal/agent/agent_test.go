@@ -2,6 +2,7 @@ package agent
 
 import (
 	"compress/gzip"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -18,19 +19,20 @@ import (
 )
 
 func sent(t *testing.T, ts *testServer) []string {
-	requests := ts.Requests()
-	result := make([]string, 0, len(requests))
-	for _, r := range requests {
-		result = append(result, metricKey(t, []byte(r.body)))
+	var result []string
+	for _, r := range ts.Requests() {
+		var batch models.MetricsList
+		require.NoError(t, easyjson.Unmarshal([]byte(r.body), &batch))
+
+		for _, m := range batch {
+			result = append(result, metricKey(t, m))
+		}
 	}
 
 	return result
 }
 
-func metricKey(t *testing.T, body []byte) string {
-	var m models.Metrics
-	require.NoError(t, easyjson.Unmarshal(body, &m))
-
+func metricKey(t *testing.T, m models.Metrics) string {
 	value, err := m.ValueString()
 	require.NoError(t, err)
 
@@ -59,15 +61,18 @@ func TestAgentSendsReportEveryFifthPoll(t *testing.T) {
 	}
 	require.Empty(t, ts.Requests())
 
-	// пятый tick — уходит первый отчёт
+	// пятый tick — уходит первый отчёт одним батчем
 	a.tick()
-	require.Len(t, ts.Requests(), metricsCount)
+	require.Len(t, ts.Requests(), 1)
+	assert.Equal(t, "/updates/", ts.Requests()[0].path)
+	require.Len(t, sent(t, ts), metricsCount)
 	assert.Contains(t, sent(t, ts), "counter/PollCount/5")
 
 	for i := 0; i < 5; i++ {
 		a.tick()
 	}
-	require.Len(t, ts.Requests(), 2*metricsCount)
+	require.Len(t, ts.Requests(), 2)
+	require.Len(t, sent(t, ts), 2*metricsCount)
 	assert.Equal(t, 2, countSent(t, ts, "counter/PollCount/5"))
 	assert.NotContains(t, sent(t, ts), "counter/PollCount/10")
 }
@@ -83,17 +88,19 @@ func TestPollCountAccumulatesToPollsOnServer(t *testing.T) {
 		}
 		defer zr.Close()
 
-		var m models.Metrics
-		if !assert.NoError(t, easyjson.UnmarshalFromReader(zr, &m)) {
+		var batch models.MetricsList
+		if !assert.NoError(t, easyjson.UnmarshalFromReader(zr, &batch)) {
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
-		if m.MType == models.Counter && m.ID == PollCountName {
-			if !assert.NotNil(t, m.Delta) {
-				w.WriteHeader(http.StatusBadRequest)
-				return
+		for _, m := range batch {
+			if m.MType == models.Counter && m.ID == PollCountName {
+				if !assert.NotNil(t, m.Delta) {
+					w.WriteHeader(http.StatusBadRequest)
+					return
+				}
+				total.Add(*m.Delta)
 			}
-			total.Add(*m.Delta)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
@@ -121,7 +128,8 @@ func TestPollCountSurvivesFailedReport(t *testing.T) {
 		a.tick()
 	}
 
-	assert.NotContains(t, sent(t, ts), "counter/PollCount/5")
+	assert.Contains(t, sent(t, ts), "counter/PollCount/5")
+	assert.Contains(t, sent(t, ts), "counter/PollCount/10")
 	assert.Equal(t, int64(10), a.collector.PollCountDelta())
 
 	ts.SetStatus(http.StatusOK)
@@ -156,6 +164,30 @@ func TestAgentLogsReport(t *testing.T) {
 	for _, e := range metrics.All() {
 		assert.Equal(t, zapcore.DebugLevel, e.Level)
 	}
+}
+
+func TestAgentLogsSkippedMetrics(t *testing.T) {
+	core, logs := observer.New(zapcore.DebugLevel)
+
+	a := New(config.DefaultAgent(), zap.New(core))
+
+	valid := a.filterReport([]models.Metrics{
+		gauge("Alloc", 1),
+		gauge("HeapAlloc", math.NaN()),
+		gauge("", 2),
+		{ID: "Sys", MType: models.Gauge},
+		{ID: "Hist", MType: "histogram"},
+		counter("PollCount", 3),
+	})
+
+	assert.Equal(t, []models.Metrics{gauge("Alloc", 1), counter("PollCount", 3)}, valid)
+
+	skipped := logs.FilterMessage("metric skipped").All()
+	require.Len(t, skipped, 4)
+	for _, e := range skipped {
+		assert.Equal(t, zapcore.ErrorLevel, e.Level)
+	}
+	assert.Equal(t, 2, logs.FilterMessage("metric").Len())
 }
 
 func TestAgentSurvivesServerErrors(t *testing.T) {

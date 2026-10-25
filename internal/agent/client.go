@@ -30,41 +30,39 @@ func NewClient(addr string) *Client {
 	}
 }
 
-func (c *Client) SendAll(metrics []models.Metrics) error {
-	for _, m := range metrics {
-		if err := c.Send(m); err != nil {
-			return err
-		}
+func (c *Client) SendBatch(metrics []models.Metrics) error {
+	if len(metrics) == 0 {
+		return nil
+	}
+
+	if err := c.post("/updates/", models.MetricsList(metrics)); err != nil {
+		return fmt.Errorf("send batch of %d: %w", len(metrics), err)
 	}
 
 	return nil
 }
 
-func (c *Client) Send(m models.Metrics) error {
-	if err := m.Validate(); err != nil {
-		return err
-	}
-
-	body, err := easyjson.Marshal(m)
+func (c *Client) post(path string, v easyjson.Marshaler) error {
+	body, err := easyjson.Marshal(v)
 	if err != nil {
-		return fmt.Errorf("send %s: %w", m.ID, err)
+		return fmt.Errorf("post %s: marshal: %w", path, err)
 	}
 
 	body, err = compress.Compress(body)
 	if err != nil {
-		return fmt.Errorf("send %s: %w", m.ID, err)
+		return fmt.Errorf("post %s: compress: %w", path, err)
 	}
 
 	resp, err := c.rest.R().
 		SetHeader("Content-Encoding", "gzip").
 		SetBody(body).
-		Post("/update")
+		Post(path)
 	if err != nil {
-		return fmt.Errorf("send %s: %w", m.ID, err)
+		return fmt.Errorf("post %s: %w", path, err)
 	}
 
 	if resp.StatusCode() != http.StatusOK {
-		return fmt.Errorf("send %s: unexpected status %d", m.ID, resp.StatusCode())
+		return fmt.Errorf("post %s: unexpected status %d", path, resp.StatusCode())
 	}
 
 	return nil

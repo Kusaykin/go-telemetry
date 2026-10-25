@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"errors"
+	"fmt"
 	"maps"
 	"slices"
 	"sync"
@@ -37,9 +38,38 @@ func (m *MemStorage) UpdateCounter(_ context.Context, name string, delta int64) 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	m.counters[name] += delta
+	value, err := models.AddDelta(m.counters[name], delta)
+	if err != nil {
+		return 0, fmt.Errorf("update counter %s: %w", name, err)
+	}
 
-	return m.counters[name], nil
+	m.counters[name] = value
+
+	return value, nil
+}
+
+func (m *MemStorage) UpdateBatch(_ context.Context, metrics []models.Metrics) error {
+	gauges, deltas, err := models.Collapse(metrics)
+	if err != nil {
+		return fmt.Errorf("update batch: %w", err)
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	counters := make(map[string]int64, len(deltas))
+	for name, delta := range deltas {
+		value, err := models.AddDelta(m.counters[name], delta)
+		if err != nil {
+			return fmt.Errorf("update batch: counter %s: %w", name, err)
+		}
+		counters[name] = value
+	}
+
+	maps.Copy(m.gauges, gauges)
+	maps.Copy(m.counters, counters)
+
+	return nil
 }
 
 func (m *MemStorage) Gauge(_ context.Context, name string) (float64, bool, error) {

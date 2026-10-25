@@ -2,7 +2,9 @@ package repository
 
 import (
 	"context"
+	"math"
 	"os"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -12,6 +14,8 @@ import (
 	"github.com/jmoiron/sqlx"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	models "github.com/Kusaykin/go-telemetry/internal/model"
 )
 
 func TestNewPostgres(t *testing.T) {
@@ -220,6 +224,67 @@ func TestPostgresStorageList(t *testing.T) {
 
 	assert.Equal(t, map[string]float64{"Alloc": 12.5, "Sys": 1}, mustGauges(t, s))
 	assert.Equal(t, map[string]int64{"PollCount": 7}, mustCounters(t, s))
+}
+
+func TestPostgresStorageUpdateBatch(t *testing.T) {
+	checkUpdateBatch(t, newPostgresStorage(t))
+}
+
+func TestPostgresStorageUpdateBatchOverflow(t *testing.T) {
+	checkUpdateBatchOverflow(t, newPostgresStorage(t))
+}
+
+func TestPostgresStorageUpdateBatchRollsBack(t *testing.T) {
+	s := newPostgresStorage(t)
+
+	mustUpdateCounter(t, s, "PollCount", 1)
+
+	err := s.UpdateBatch(t.Context(), []models.Metrics{
+		gaugeMetric("Alloc", 1.5),
+		counterMetric("A", 1),
+		counterMetric("PollCount", math.MaxInt64),
+	})
+	require.ErrorIs(t, err, models.ErrCounterOverflow)
+
+	assert.Empty(t, mustGauges(t, s))
+	assert.Equal(t, map[string]int64{"PollCount": 1}, mustCounters(t, s))
+}
+
+func TestPostgresStorageCounterOverflow(t *testing.T) {
+	s := newPostgresStorage(t)
+
+	mustUpdateCounter(t, s, "PollCount", math.MaxInt64)
+
+	_, err := s.UpdateCounter(t.Context(), "PollCount", 1)
+
+	require.ErrorIs(t, err, models.ErrCounterOverflow)
+	delta, _ := mustCounter(t, s, "PollCount")
+	assert.Equal(t, int64(math.MaxInt64), delta)
+}
+
+func TestPostgresStorageConcurrentBatches(t *testing.T) {
+	s := newPostgresStorage(t)
+
+	const workers, batches = 8, 20
+
+	ctx := t.Context()
+
+	var wg sync.WaitGroup
+	for i := range workers {
+		wg.Go(func() {
+			batch := []models.Metrics{counterMetric("A", 1), counterMetric("B", 1)}
+			if i%2 == 1 {
+				slices.Reverse(batch)
+			}
+
+			for range batches {
+				assert.NoError(t, s.UpdateBatch(ctx, batch))
+			}
+		})
+	}
+	wg.Wait()
+
+	assert.Equal(t, map[string]int64{"A": workers * batches, "B": workers * batches}, mustCounters(t, s))
 }
 
 func TestPostgresStorageConcurrentCounter(t *testing.T) {

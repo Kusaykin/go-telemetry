@@ -6,15 +6,20 @@ import (
 	"database/sql/driver"
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
 	"strconv"
 	"time"
 
 	"github.com/golang-migrate/migrate/v4"
 	migratepg "github.com/golang-migrate/migrate/v4/database/postgres"
 	"github.com/golang-migrate/migrate/v4/source/iofs"
-	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/stdlib"
 	"github.com/jmoiron/sqlx"
 
+	models "github.com/Kusaykin/go-telemetry/internal/model"
 	"github.com/Kusaykin/go-telemetry/migrations"
 )
 
@@ -114,12 +119,16 @@ func NewPostgresStorage(db *sqlx.DB) *PostgresStorage {
 	return &PostgresStorage{db: db}
 }
 
+const (
+	upsertGauge = `INSERT INTO gauges (name, value) VALUES ($1, $2)
+		 ON CONFLICT (name) DO UPDATE SET value = EXCLUDED.value`
+
+	upsertCounter = `INSERT INTO counters (name, delta) VALUES ($1, $2)
+		 ON CONFLICT (name) DO UPDATE SET delta = counters.delta + EXCLUDED.delta`
+)
+
 func (s *PostgresStorage) UpdateGauge(ctx context.Context, name string, value float64) error {
-	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO gauges (name, value) VALUES ($1, $2)
-		 ON CONFLICT (name) DO UPDATE SET value = EXCLUDED.value`,
-		name, value)
-	if err != nil {
+	if _, err := s.db.ExecContext(ctx, upsertGauge, name, value); err != nil {
 		return fmt.Errorf("update gauge %s: %w", name, err)
 	}
 
@@ -129,16 +138,98 @@ func (s *PostgresStorage) UpdateGauge(ctx context.Context, name string, value fl
 func (s *PostgresStorage) UpdateCounter(ctx context.Context, name string, delta int64) (int64, error) {
 	var value int64
 
-	err := s.db.GetContext(ctx, &value,
-		`INSERT INTO counters (name, delta) VALUES ($1, $2)
-		 ON CONFLICT (name) DO UPDATE SET delta = counters.delta + EXCLUDED.delta
-		 RETURNING delta`,
-		name, delta)
-	if err != nil {
-		return 0, fmt.Errorf("update counter %s: %w", name, err)
+	if err := s.db.GetContext(ctx, &value, upsertCounter+` RETURNING delta`, name, delta); err != nil {
+		return 0, fmt.Errorf("update counter %s: %w", name, counterError(err))
 	}
 
 	return value, nil
+}
+
+func (s *PostgresStorage) UpdateBatch(ctx context.Context, metrics []models.Metrics) (err error) {
+	gauges, counters, err := models.Collapse(metrics)
+	if err != nil {
+		return fmt.Errorf("update batch: %w", err)
+	}
+
+	if len(gauges) == 0 && len(counters) == 0 {
+		return nil
+	}
+
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("update batch: acquire connection: %w", err)
+	}
+
+	defer func() {
+		err = errors.Join(err, conn.Close())
+	}()
+
+	// pgx.Batch доступен только на нативном соединении pgx, поэтому
+	// достаём его из database/sql на время транзакции.
+	err = conn.Raw(func(driverConn any) error {
+		pc, ok := driverConn.(*stdlib.Conn)
+		if !ok {
+			return fmt.Errorf("unexpected driver connection %T", driverConn)
+		}
+
+		return pgx.BeginFunc(ctx, pc.Conn(), func(tx pgx.Tx) error {
+			return upsertBatch(ctx, tx, gauges, counters)
+		})
+	})
+	if err != nil {
+		return fmt.Errorf("update batch: %w", err)
+	}
+
+	return nil
+}
+
+// upsertBatch отправляет все upsert-ы одним pgx.Batch — за один round-trip.
+// Имена сортируются, чтобы параллельные батчи брали блокировки строк
+// в одном порядке и не уходили в дедлок.
+func upsertBatch(ctx context.Context, tx pgx.Tx, gauges map[string]float64, counters map[string]int64) (err error) {
+	gaugeNames := slices.Sorted(maps.Keys(gauges))
+	counterNames := slices.Sorted(maps.Keys(counters))
+
+	batch := &pgx.Batch{}
+	for _, name := range gaugeNames {
+		batch.Queue(upsertGauge, name, gauges[name])
+	}
+	for _, name := range counterNames {
+		batch.Queue(upsertCounter, name, counters[name])
+	}
+
+	br := tx.SendBatch(ctx, batch)
+	defer func() {
+		err = errors.Join(err, br.Close())
+	}()
+
+	// Результаты читаются по очереди, чтобы в ошибке было имя метрики.
+	for _, name := range gaugeNames {
+		if _, err := br.Exec(); err != nil {
+			return fmt.Errorf("gauge %s: %w", name, err)
+		}
+	}
+	for _, name := range counterNames {
+		if _, err := br.Exec(); err != nil {
+			return fmt.Errorf("counter %s: %w", name, counterError(err))
+		}
+	}
+
+	return nil
+}
+
+// pgNumericValueOutOfRange — SQLSTATE 22003, в том числе переполнение bigint.
+const pgNumericValueOutOfRange = "22003"
+
+// counterError приводит переполнение bigint к ErrCounterOverflow,
+// чтобы оно обрабатывалось так же, как в MemStorage.
+func counterError(err error) error {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == pgNumericValueOutOfRange {
+		return fmt.Errorf("%w: %w", models.ErrCounterOverflow, err)
+	}
+
+	return err
 }
 
 func (s *PostgresStorage) Gauge(ctx context.Context, name string) (float64, bool, error) {

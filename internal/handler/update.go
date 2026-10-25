@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"errors"
 	"math"
 	"net/http"
 	"strconv"
@@ -55,13 +56,8 @@ func (h *Handler) UpdateJSON(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if m.ID == "" {
-		w.WriteHeader(http.StatusNotFound)
-		return
-	}
-
-	if err := m.Validate(); err != nil {
-		w.WriteHeader(http.StatusBadRequest)
+	if status := validateMetric(m); status != http.StatusOK {
+		w.WriteHeader(status)
 		return
 	}
 
@@ -86,6 +82,12 @@ func (h *Handler) UpdateJSON(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) storageError(w http.ResponseWriter, r *http.Request, err error) {
+	if errors.Is(err, models.ErrCounterOverflow) {
+		h.log.Warn("storage: counter overflow", zap.Error(err))
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
 	if r.Context().Err() != nil {
 		h.log.Debug("storage: request canceled", zap.Error(err))
 	} else {

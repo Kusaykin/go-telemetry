@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"slices"
 	"time"
 
 	"github.com/Kusaykin/go-telemetry/internal/config"
@@ -59,23 +60,30 @@ func (a *Agent) tick() {
 	snapshot := a.collector.Snapshot()
 	pollCount := a.collector.PollCountDelta()
 
-	a.logReport(snapshot)
+	metrics := a.filterReport(snapshot)
 
-	if err := a.client.SendAll(snapshot); err != nil {
+	if err := a.client.SendBatch(metrics); err != nil {
 		a.log.Error("report failed", zap.Error(err))
 		return
 	}
 
-	a.collector.AckPollCount(pollCount)
+	if slices.ContainsFunc(metrics, isPollCount) {
+		a.collector.AckPollCount(pollCount)
+	}
 }
 
-func (a *Agent) logReport(snapshot []models.Metrics) {
+func isPollCount(m models.Metrics) bool {
+	return m.MType == models.Counter && m.ID == PollCountName
+}
+
+func (a *Agent) filterReport(snapshot []models.Metrics) []models.Metrics {
 	a.log.Info("report", zap.Int("metrics", len(snapshot)))
 
+	valid := make([]models.Metrics, 0, len(snapshot))
 	for _, m := range snapshot {
 		value, err := m.ValueString()
 		if err != nil {
-			a.log.Error("metric",
+			a.log.Error("metric skipped",
 				zap.String("type", m.MType),
 				zap.String("id", m.ID),
 				zap.Error(err),
@@ -87,5 +95,8 @@ func (a *Agent) logReport(snapshot []models.Metrics) {
 			zap.String("id", m.ID),
 			zap.String("value", value),
 		)
+		valid = append(valid, m)
 	}
+
+	return valid
 }

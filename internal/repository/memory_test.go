@@ -1,10 +1,12 @@
 package repository
 
 import (
+	"math"
 	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	models "github.com/Kusaykin/go-telemetry/internal/model"
 )
@@ -27,6 +29,45 @@ func TestUpdateCounter(t *testing.T) {
 
 	assert.Equal(t, int64(15), mustUpdateCounter(t, m, "PollCount", 10))
 	assert.Equal(t, int64(15), m.counters["PollCount"])
+}
+
+func TestUpdateBatch(t *testing.T) {
+	checkUpdateBatch(t, NewMemStorage())
+}
+
+func TestUpdateBatchOverflow(t *testing.T) {
+	checkUpdateBatchOverflow(t, NewMemStorage())
+}
+
+func TestUpdateCounterOverflow(t *testing.T) {
+	m := NewMemStorage()
+	mustUpdateCounter(t, m, "PollCount", math.MaxInt64)
+
+	_, err := m.UpdateCounter(t.Context(), "PollCount", 1)
+
+	require.ErrorIs(t, err, models.ErrCounterOverflow)
+	assert.Equal(t, int64(math.MaxInt64), m.counters["PollCount"])
+}
+
+func TestUpdateBatchConcurrent(t *testing.T) {
+	m := NewMemStorage()
+
+	const workers, batches = 8, 20
+
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Go(func() {
+			for range batches {
+				assert.NoError(t, m.UpdateBatch(t.Context(), []models.Metrics{
+					counterMetric("PollCount", 1),
+					counterMetric("PollCount", 1),
+				}))
+			}
+		})
+	}
+	wg.Wait()
+
+	assert.Equal(t, int64(2*workers*batches), m.counters["PollCount"])
 }
 
 func TestGauge(t *testing.T) {

@@ -108,6 +108,17 @@ func (s *FileStorage) UpdateCounter(ctx context.Context, name string, delta int6
 	return value, nil
 }
 
+func (s *FileStorage) UpdateBatch(ctx context.Context, metrics []models.Metrics) error {
+	if err := s.MemStorage.UpdateBatch(ctx, metrics); err != nil {
+		return err
+	}
+
+	s.dirty.Store(true)
+	s.saveIfSync()
+
+	return nil
+}
+
 func (s *FileStorage) syncWrite() bool {
 	return s.interval == 0
 }

@@ -2,16 +2,70 @@ package repository
 
 import (
 	"context"
+	"math"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	models "github.com/Kusaykin/go-telemetry/internal/model"
 )
 
-// metricStore — методы, общие для всех хранилищ. Хелперы ниже проверяют
-// ошибку, чтобы тесты читались так же, как до появления context и error.
+func gaugeMetric(id string, value float64) models.Metrics {
+	return models.Metrics{ID: id, MType: models.Gauge, Value: &value}
+}
+
+func counterMetric(id string, delta int64) models.Metrics {
+	return models.Metrics{ID: id, MType: models.Counter, Delta: &delta}
+}
+
+func checkUpdateBatch(t *testing.T, s metricStore) {
+	t.Helper()
+
+	mustUpdateCounter(t, s, "PollCount", 1)
+
+	require.NoError(t, s.UpdateBatch(t.Context(), []models.Metrics{
+		gaugeMetric("Alloc", 1.5),
+		counterMetric("PollCount", 2),
+		gaugeMetric("Alloc", 2.5),
+		gaugeMetric("Sys", 0),
+		counterMetric("PollCount", 3),
+	}))
+
+	assert.Equal(t, map[string]float64{"Alloc": 2.5, "Sys": 0}, mustGauges(t, s))
+	assert.Equal(t, map[string]int64{"PollCount": 6}, mustCounters(t, s))
+
+	require.NoError(t, s.UpdateBatch(t.Context(), nil))
+	assert.Equal(t, map[string]int64{"PollCount": 6}, mustCounters(t, s))
+}
+
+func checkUpdateBatchOverflow(t *testing.T, s metricStore) {
+	t.Helper()
+
+	mustUpdateGauge(t, s, "Alloc", 1)
+	mustUpdateCounter(t, s, "PollCount", 1)
+
+	err := s.UpdateBatch(t.Context(), []models.Metrics{
+		gaugeMetric("Alloc", 2),
+		counterMetric("Big", math.MaxInt64),
+		counterMetric("Big", 1),
+	})
+	require.ErrorIs(t, err, models.ErrCounterOverflow)
+
+	err = s.UpdateBatch(t.Context(), []models.Metrics{
+		gaugeMetric("Alloc", 2),
+		counterMetric("PollCount", math.MaxInt64),
+	})
+	require.ErrorIs(t, err, models.ErrCounterOverflow)
+
+	assert.Equal(t, map[string]float64{"Alloc": 1}, mustGauges(t, s))
+	assert.Equal(t, map[string]int64{"PollCount": 1}, mustCounters(t, s))
+}
+
 type metricStore interface {
 	UpdateGauge(ctx context.Context, name string, value float64) error
 	UpdateCounter(ctx context.Context, name string, delta int64) (int64, error)
+	UpdateBatch(ctx context.Context, metrics []models.Metrics) error
 	Gauge(ctx context.Context, name string) (float64, bool, error)
 	Counter(ctx context.Context, name string) (int64, bool, error)
 	Gauges(ctx context.Context) (map[string]float64, error)
