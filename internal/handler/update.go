@@ -56,8 +56,8 @@ func (h *Handler) UpdateJSON(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if status := validateMetric(m); status != http.StatusOK {
-		w.WriteHeader(status)
+	if err := m.Validate(); err != nil {
+		w.WriteHeader(invalidMetricStatus(err))
 		return
 	}
 

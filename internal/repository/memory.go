@@ -3,7 +3,6 @@ package repository
 import (
 	"cmp"
 	"context"
-	"errors"
 	"fmt"
 	"maps"
 	"slices"
@@ -130,10 +129,6 @@ func (m *MemStorage) restore(metrics []models.Metrics) error {
 	counters := make(map[string]int64)
 
 	for _, metric := range metrics {
-		if metric.ID == "" {
-			return errors.New("metric id is empty")
-		}
-
 		if err := metric.Validate(); err != nil {
 			return err
 		}

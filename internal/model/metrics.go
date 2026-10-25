@@ -59,8 +59,6 @@ func (m Metrics) Validate() error {
 	return nil
 }
 
-// ValueString возвращает значение метрики в текстовом виде — в том формате,
-// в котором оно передаётся в URL и отдаётся сервером.
 func (m Metrics) ValueString() (string, error) {
 	if err := m.Validate(); err != nil {
 		return "", err
@@ -73,7 +71,6 @@ func (m Metrics) ValueString() (string, error) {
 	return FormatCounter(*m.Delta), nil
 }
 
-// FormatGauge и FormatCounter — единый формат значений для агента и сервера.
 func FormatGauge(value float64) string {
 	return strconv.FormatFloat(value, 'f', -1, 64)
 }
@@ -93,15 +90,39 @@ func AddDelta(value, delta int64) (int64, error) {
 	return sum, nil
 }
 
+type InvalidMetricError struct {
+	Index  int
+	Metric Metrics
+	Err    error
+}
+
+func (e *InvalidMetricError) Error() string {
+	return fmt.Sprintf("metric %d: %v", e.Index, e.Err)
+}
+
+func (e *InvalidMetricError) Unwrap() error {
+	return e.Err
+}
+
+func ValidateBatch(metrics []Metrics) error {
+	for i, m := range metrics {
+		if err := m.Validate(); err != nil {
+			return &InvalidMetricError{Index: i, Metric: m, Err: err}
+		}
+	}
+
+	return nil
+}
+
 func Collapse(metrics []Metrics) (map[string]float64, map[string]int64, error) {
+	if err := ValidateBatch(metrics); err != nil {
+		return nil, nil, err
+	}
+
 	gauges := make(map[string]float64)
 	counters := make(map[string]int64)
 
-	for i, m := range metrics {
-		if err := m.Validate(); err != nil {
-			return nil, nil, fmt.Errorf("metric %d: %w", i, err)
-		}
-
+	for _, m := range metrics {
 		switch m.MType {
 		case Gauge:
 			gauges[m.ID] = *m.Value

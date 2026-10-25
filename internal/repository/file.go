@@ -109,6 +109,10 @@ func (s *FileStorage) UpdateCounter(ctx context.Context, name string, delta int6
 }
 
 func (s *FileStorage) UpdateBatch(ctx context.Context, metrics []models.Metrics) error {
+	if len(metrics) == 0 {
+		return nil
+	}
+
 	if err := s.MemStorage.UpdateBatch(ctx, metrics); err != nil {
 		return err
 	}

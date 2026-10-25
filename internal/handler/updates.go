@@ -1,8 +1,10 @@
 package handler
 
 import (
+	"errors"
 	"net/http"
 
+	models "github.com/Kusaykin/go-telemetry/internal/model"
 	"go.uber.org/zap"
 )
 
@@ -15,21 +17,20 @@ func (h *Handler) Updates(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	for i, m := range metrics {
-		if err := m.Validate(); err != nil {
+	if err := h.store.UpdateBatch(r.Context(), metrics); err != nil {
+		var invalid *models.InvalidMetricError
+		if errors.As(err, &invalid) {
 			h.log.Warn("updates: batch rejected",
 				zap.Int("status", http.StatusBadRequest),
-				zap.Int("index", i),
-				zap.String("id", m.ID),
-				zap.String("type", m.MType),
 				zap.Error(err),
+				zap.Int("index", invalid.Index),
+				zap.String("id", invalid.Metric.ID),
+				zap.String("type", invalid.Metric.MType),
 			)
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
-	}
 
-	if err := h.store.UpdateBatch(r.Context(), metrics); err != nil {
 		h.storageError(w, r, err)
 		return
 	}

@@ -2,14 +2,21 @@ package agent
 
 import (
 	"compress/gzip"
+	"context"
 	"io"
+	"math"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"slices"
 	"sync"
+	"sync/atomic"
+	"syscall"
 	"testing"
+	"time"
 
 	models "github.com/Kusaykin/go-telemetry/internal/model"
+	"github.com/Kusaykin/go-telemetry/internal/retry"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -22,8 +29,6 @@ type request struct {
 	body            string
 }
 
-// testServer пишется из горутины HTTP-сервера, а читается из теста,
-// поэтому доступ к полям идёт только под mu.
 type testServer struct {
 	mu       sync.Mutex
 	requests []request
@@ -101,7 +106,7 @@ func TestSendBatch(t *testing.T) {
 		counter("PollCount", 3),
 	}
 
-	err := client.SendBatch(metrics)
+	err := client.SendBatch(t.Context(), metrics)
 	require.NoError(t, err)
 
 	requests := ts.Requests()
@@ -121,17 +126,80 @@ func TestSendBatch(t *testing.T) {
 func TestSendBatchEmpty(t *testing.T) {
 	ts, client := newTestServer(t, http.StatusOK)
 
-	require.NoError(t, client.SendBatch(nil))
-	require.NoError(t, client.SendBatch([]models.Metrics{}))
+	require.NoError(t, client.SendBatch(t.Context(), nil))
+	require.NoError(t, client.SendBatch(t.Context(), []models.Metrics{}))
 	assert.Empty(t, ts.Requests())
 }
 
 func TestSendBatchServerError(t *testing.T) {
 	ts, client := newTestServer(t, http.StatusInternalServerError)
 
-	err := client.SendBatch([]models.Metrics{gauge("Alloc", 1)})
+	err := client.SendBatch(t.Context(), []models.Metrics{gauge("Alloc", 1)})
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "500")
 	assert.Len(t, ts.Requests(), 1)
+}
+
+func refuseDials(c *Client, n int32) *atomic.Int32 {
+	var (
+		dials  atomic.Int32
+		dialer net.Dialer
+	)
+
+	c.rest.SetTransport(&http.Transport{
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			if dials.Add(1) <= n {
+				return nil, &net.OpError{Op: "dial", Net: network, Err: syscall.ECONNREFUSED}
+			}
+			return dialer.DialContext(ctx, network, addr)
+		},
+	})
+
+	return &dials
+}
+
+func TestSendBatchGivesUpAfterRetries(t *testing.T) {
+	client := NewClient("127.0.0.1:1")
+	client.delays = []time.Duration{20 * time.Millisecond, 20 * time.Millisecond, 20 * time.Millisecond}
+	refuseDials(client, math.MaxInt32)
+
+	start := time.Now()
+	err := client.SendBatch(t.Context(), []models.Metrics{gauge("Alloc", 1)})
+
+	require.Error(t, err)
+	assert.True(t, isConnError(err))
+	assert.GreaterOrEqual(t, time.Since(start), 60*time.Millisecond)
+}
+
+func TestSendBatchRetriesUntilServerIsUp(t *testing.T) {
+	received := make(chan struct{}, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		received <- struct{}{}
+	}))
+	t.Cleanup(srv.Close)
+
+	client := NewClient(srv.Listener.Addr().String())
+	client.delays = []time.Duration{20 * time.Millisecond, 20 * time.Millisecond, 20 * time.Millisecond}
+	dials := refuseDials(client, 2)
+
+	err := client.SendBatch(t.Context(), []models.Metrics{gauge("Alloc", 1)})
+
+	require.NoError(t, err)
+	assert.Equal(t, int32(3), dials.Load(), "две неудачные попытки и одна успешная")
+	assert.Len(t, received, 1)
+}
+
+func TestSendBatchStopsRetryingOnCancel(t *testing.T) {
+	client := NewClient("127.0.0.1:1")
+	refuseDials(client, math.MaxInt32)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	err := client.SendBatch(ctx, []models.Metrics{gauge("Alloc", 1)})
+
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	assert.Less(t, time.Since(start), retry.Delays()[0])
 }

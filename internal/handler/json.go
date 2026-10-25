@@ -56,16 +56,12 @@ func decodeStatus(err error) int {
 	return http.StatusBadRequest
 }
 
-func validateMetric(m models.Metrics) int {
-	err := m.Validate()
-	switch {
-	case err == nil:
-		return http.StatusOK
-	case errors.Is(err, models.ErrEmptyID):
+func invalidMetricStatus(err error) int {
+	if errors.Is(err, models.ErrEmptyID) {
 		return http.StatusNotFound
-	default:
-		return http.StatusBadRequest
 	}
+
+	return http.StatusBadRequest
 }
 
 func writeJSON(w http.ResponseWriter, m models.Metrics) {

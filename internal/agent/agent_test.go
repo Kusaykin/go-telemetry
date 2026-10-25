@@ -2,11 +2,14 @@ package agent
 
 import (
 	"compress/gzip"
+	"context"
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/Kusaykin/go-telemetry/internal/config"
 	models "github.com/Kusaykin/go-telemetry/internal/model"
@@ -17,6 +20,15 @@ import (
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
 )
+
+// tick выполняет тот же шаг, что и Run, и дожидается фоновой отправки.
+func (a *Agent) tick(ctx context.Context) {
+	sending := make(chan struct{}, 1)
+	var wg sync.WaitGroup
+
+	a.step(ctx, sending, &wg)
+	wg.Wait()
+}
 
 func sent(t *testing.T, ts *testServer) []string {
 	var result []string
@@ -57,19 +69,19 @@ func TestAgentSendsReportEveryFifthPoll(t *testing.T) {
 	a.client = client
 
 	for i := 0; i < 4; i++ {
-		a.tick()
+		a.tick(t.Context())
 	}
 	require.Empty(t, ts.Requests())
 
 	// пятый tick — уходит первый отчёт одним батчем
-	a.tick()
+	a.tick(t.Context())
 	require.Len(t, ts.Requests(), 1)
 	assert.Equal(t, "/updates/", ts.Requests()[0].path)
 	require.Len(t, sent(t, ts), metricsCount)
 	assert.Contains(t, sent(t, ts), "counter/PollCount/5")
 
 	for i := 0; i < 5; i++ {
-		a.tick()
+		a.tick(t.Context())
 	}
 	require.Len(t, ts.Requests(), 2)
 	require.Len(t, sent(t, ts), 2*metricsCount)
@@ -112,7 +124,7 @@ func TestPollCountAccumulatesToPollsOnServer(t *testing.T) {
 
 	const polls = 20
 	for range polls {
-		a.tick()
+		a.tick(t.Context())
 	}
 
 	assert.Equal(t, int64(polls), total.Load())
@@ -125,7 +137,7 @@ func TestPollCountSurvivesFailedReport(t *testing.T) {
 	a.client = client
 
 	for i := 0; i < 10; i++ {
-		a.tick()
+		a.tick(t.Context())
 	}
 
 	assert.Contains(t, sent(t, ts), "counter/PollCount/5")
@@ -134,7 +146,7 @@ func TestPollCountSurvivesFailedReport(t *testing.T) {
 
 	ts.SetStatus(http.StatusOK)
 	for i := 0; i < 5; i++ {
-		a.tick()
+		a.tick(t.Context())
 	}
 
 	assert.Contains(t, sent(t, ts), "counter/PollCount/15")
@@ -149,7 +161,7 @@ func TestAgentLogsReport(t *testing.T) {
 	a.client = client
 
 	for i := 0; i < 5; i++ {
-		a.tick()
+		a.tick(t.Context())
 	}
 
 	reports := logs.FilterMessage("report").All()
@@ -198,7 +210,7 @@ func TestAgentSurvivesServerErrors(t *testing.T) {
 	a.client = client
 
 	for i := 0; i < 10; i++ {
-		a.tick()
+		a.tick(t.Context())
 	}
 
 	assert.Len(t, ts.Requests(), 2)
@@ -207,4 +219,27 @@ func TestAgentSurvivesServerErrors(t *testing.T) {
 	failures := logs.FilterMessage("report failed").All()
 	require.Len(t, failures, 2)
 	assert.Equal(t, zapcore.ErrorLevel, failures[0].Level)
+}
+
+func TestAgentKeepsPollingWhileReportRetries(t *testing.T) {
+	cfg := config.DefaultAgent()
+	cfg.PollInterval = 10 * time.Millisecond
+	cfg.ReportInterval = 10 * time.Millisecond
+
+	core, logs := observer.New(zapcore.InfoLevel)
+	a := New(cfg, zap.New(core))
+	a.client = NewClient("127.0.0.1:1")
+	a.client.delays = []time.Duration{time.Hour}
+	refuseDials(a.client, math.MaxInt32)
+	a.flushTimeout = 50 * time.Millisecond
+
+	ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	a.Run(ctx)
+
+	assert.Less(t, time.Since(start), time.Second)
+	assert.Greater(t, a.collector.PollCountDelta(), int64(5))
+	assert.Positive(t, logs.FilterMessage("report postponed: previous report is still in progress").Len())
 }

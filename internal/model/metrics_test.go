@@ -78,7 +78,10 @@ func TestCollapseInvalid(t *testing.T) {
 				gauges, counters, err = Collapse([]Metrics{g("Sys", 1), tt.metric})
 			})
 
-			require.Error(t, err)
+			var invalid *InvalidMetricError
+			require.ErrorAs(t, err, &invalid)
+			assert.Equal(t, 1, invalid.Index)
+			assert.Equal(t, tt.metric.ID, invalid.Metric.ID)
 			assert.Contains(t, err.Error(), "metric 1")
 			assert.Nil(t, gauges)
 			assert.Nil(t, counters)

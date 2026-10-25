@@ -2,20 +2,29 @@ package repository
 
 import (
 	"context"
+	"database/sql/driver"
+	"errors"
+	"fmt"
+	"io"
 	"math"
+	"net"
 	"os"
 	"slices"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/golang-migrate/migrate/v4/database"
 	migratepg "github.com/golang-migrate/migrate/v4/database/postgres"
+	"github.com/jackc/pgerrcode"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jmoiron/sqlx"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	models "github.com/Kusaykin/go-telemetry/internal/model"
+	"github.com/Kusaykin/go-telemetry/internal/retry"
 )
 
 func TestNewPostgres(t *testing.T) {
@@ -36,7 +45,6 @@ func TestNewPostgres(t *testing.T) {
 	})
 }
 
-// openPostgres открывает пул без подключения и закрывает его после теста.
 func openPostgres(t *testing.T, dsn string) *sqlx.DB {
 	t.Helper()
 
@@ -307,4 +315,128 @@ func TestPostgresStorageConcurrentCounter(t *testing.T) {
 
 	delta, _ := mustCounter(t, s, "PollCount")
 	assert.Equal(t, int64(workers*updates), delta)
+}
+
+func TestIsRetriable(t *testing.T) {
+	pgErr := func(code string) error {
+		return fmt.Errorf("wrapped: %w", &pgconn.PgError{Code: code})
+	}
+
+	t.Run("Class 08 повторяется", func(t *testing.T) {
+		for _, code := range []string{
+			pgerrcode.ConnectionException,
+			pgerrcode.ConnectionDoesNotExist,
+			pgerrcode.ConnectionFailure,
+			pgerrcode.SQLClientUnableToEstablishSQLConnection,
+		} {
+			assert.True(t, IsRetriable(pgErr(code)), code)
+		}
+	})
+
+	t.Run("перезапуск или неготовность сервера повторяются", func(t *testing.T) {
+		for _, code := range []string{
+			pgerrcode.AdminShutdown,
+			pgerrcode.CrashShutdown,
+			pgerrcode.CannotConnectNow,
+		} {
+			assert.True(t, IsRetriable(pgErr(code)), code)
+		}
+	})
+
+	t.Run("обрыв соединения посреди запроса повторяется", func(t *testing.T) {
+		for _, err := range []error{
+			io.EOF,
+			io.ErrUnexpectedEOF,
+			&net.OpError{Op: "read", Net: "tcp", Err: syscall.ECONNRESET},
+			driver.ErrBadConn,
+		} {
+			assert.True(t, IsRetriable(fmt.Errorf("wrapped: %w", err)), err.Error())
+		}
+	})
+
+	t.Run("прочие ошибки PostgreSQL не повторяются", func(t *testing.T) {
+		for _, code := range []string{
+			pgerrcode.UniqueViolation,
+			pgerrcode.NumericValueOutOfRange,
+			pgerrcode.UndefinedTable,
+		} {
+			assert.False(t, IsRetriable(pgErr(code)), code)
+		}
+	})
+
+	t.Run("неудачное подключение повторяется", func(t *testing.T) {
+		db := openPostgres(t, "postgres://127.0.0.1:1/metrics?sslmode=disable&connect_timeout=1")
+		assert.True(t, IsRetriable(db.PingContext(t.Context())))
+	})
+
+	t.Run("несуществующий хост не повторяется", func(t *testing.T) {
+		db := openPostgres(t, "postgres://no-such-host.invalid:5432/metrics?sslmode=disable&connect_timeout=1")
+		err := db.PingContext(t.Context())
+
+		var dnsErr *net.DNSError
+		require.ErrorAs(t, err, &dnsErr)
+		assert.False(t, IsRetriable(err))
+	})
+
+	t.Run("прочие ошибки не повторяются", func(t *testing.T) {
+		assert.False(t, IsRetriable(errors.New("boom")))
+		assert.False(t, IsRetriable(context.Canceled))
+	})
+}
+
+func TestPostgresStorageRetriesConnectionErrors(t *testing.T) {
+	db := openPostgres(t, "postgres://127.0.0.1:1/metrics?sslmode=disable&connect_timeout=1")
+	s := NewPostgresStorage(db)
+	s.delays = []time.Duration{20 * time.Millisecond, 20 * time.Millisecond, 20 * time.Millisecond}
+
+	start := time.Now()
+	err := s.UpdateGauge(t.Context(), "Alloc", 1)
+
+	require.Error(t, err)
+	assert.True(t, IsRetriable(err))
+	assert.GreaterOrEqual(t, time.Since(start), 60*time.Millisecond)
+}
+
+func TestPostgresStorageStopsRetryingOnCancel(t *testing.T) {
+	db := openPostgres(t, "postgres://127.0.0.1:1/metrics?sslmode=disable&connect_timeout=1")
+	s := NewPostgresStorage(db)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	err := s.UpdateGauge(ctx, "Alloc", 1)
+
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	assert.Less(t, time.Since(start), retry.Delays()[0])
+}
+
+func TestPostgresStorageStopsRetryingOnShutdown(t *testing.T) {
+	db := openPostgres(t, "postgres://127.0.0.1:1/metrics?sslmode=disable&connect_timeout=1")
+	s := NewPostgresStorage(db)
+
+	runCtx, shutdown := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { done <- s.Run(runCtx) }()
+
+	time.AfterFunc(50*time.Millisecond, shutdown)
+
+	start := time.Now()
+	err := s.UpdateGauge(t.Context(), "Alloc", 1)
+
+	require.ErrorIs(t, err, context.Canceled)
+	assert.True(t, IsRetriable(err), "возвращается исходная ошибка подключения")
+	assert.Less(t, time.Since(start), retry.Delays()[0])
+	require.NoError(t, <-done)
+}
+
+func TestPostgresStoragePingDoesNotRetry(t *testing.T) {
+	db := openPostgres(t, "postgres://127.0.0.1:1/metrics?sslmode=disable&connect_timeout=1")
+	s := NewPostgresStorage(db)
+
+	start := time.Now()
+	err := s.PingContext(t.Context())
+
+	require.Error(t, err)
+	assert.Less(t, time.Since(start), retry.Delays()[0])
 }

@@ -5,6 +5,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -191,7 +192,9 @@ func TestRunFailsOnUnreachableDatabase(t *testing.T) {
 	}
 
 	err := run(context.Background(), cfg, zap.NewNop())
-	assert.Error(t, err)
+
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "connect postgres")
 }
 
 func TestRunFailsOnBusyAddress(t *testing.T) {
@@ -225,4 +228,38 @@ func TestRunSavesOnShutdown(t *testing.T) {
 	data, err := os.ReadFile(path)
 	require.NoError(t, err, "при завершении метрики должны сохраняться в файл")
 	assert.JSONEq(t, "[]", string(data))
+}
+
+func TestInflightWaitsForRunningHandlers(t *testing.T) {
+	var handlers inflight
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	h := handlers.wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(started)
+		<-release
+	}))
+
+	go h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/updates/", nil))
+	<-started
+
+	waited := make(chan struct{})
+	go func() {
+		handlers.wait()
+		close(waited)
+	}()
+
+	select {
+	case <-waited:
+		t.Fatal("wait вернулся раньше завершения обработчика")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(release)
+
+	select {
+	case <-waited:
+	case <-time.After(time.Second):
+		t.Fatal("wait не дождался завершения обработчика")
+	}
 }

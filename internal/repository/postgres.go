@@ -6,20 +6,25 @@ import (
 	"database/sql/driver"
 	"errors"
 	"fmt"
+	"io"
 	"maps"
+	"net"
 	"slices"
 	"strconv"
+	"syscall"
 	"time"
 
 	"github.com/golang-migrate/migrate/v4"
 	migratepg "github.com/golang-migrate/migrate/v4/database/postgres"
 	"github.com/golang-migrate/migrate/v4/source/iofs"
+	"github.com/jackc/pgerrcode"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/stdlib"
 	"github.com/jmoiron/sqlx"
 
 	models "github.com/Kusaykin/go-telemetry/internal/model"
+	"github.com/Kusaykin/go-telemetry/internal/retry"
 	"github.com/Kusaykin/go-telemetry/migrations"
 )
 
@@ -112,11 +117,86 @@ func releaseMigrationConn(conn *sql.Conn, resetSession bool) error {
 }
 
 type PostgresStorage struct {
-	db *sqlx.DB
+	db     *sqlx.DB
+	delays []time.Duration
+
+	stopping context.Context
+	stop     context.CancelFunc
 }
 
 func NewPostgresStorage(db *sqlx.DB) *PostgresStorage {
-	return &PostgresStorage{db: db}
+	stopping, stop := context.WithCancel(context.Background())
+
+	return &PostgresStorage{db: db, delays: retry.Delays(), stopping: stopping, stop: stop}
+}
+
+func IsRetriable(err error) bool {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		return pgerrcode.IsConnectionException(pgErr.Code) || isServerUnavailable(pgErr.Code)
+	}
+
+	var connErr *pgconn.ConnectError
+	if errors.As(err, &connErr) {
+		return isTransientConnect(connErr)
+	}
+
+	return errors.Is(err, io.EOF) ||
+		errors.Is(err, io.ErrUnexpectedEOF) ||
+		errors.Is(err, syscall.ECONNRESET) ||
+		errors.Is(err, driver.ErrBadConn)
+}
+
+func isTransientConnect(err *pgconn.ConnectError) bool {
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return dnsErr.IsTemporary || dnsErr.IsTimeout
+	}
+
+	var netErr net.Error
+	if pgconn.Timeout(err) || errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+
+	return errors.Is(err, syscall.ECONNREFUSED) ||
+		errors.Is(err, syscall.ECONNRESET) ||
+		errors.Is(err, syscall.ECONNABORTED) ||
+		errors.Is(err, syscall.EHOSTUNREACH) ||
+		errors.Is(err, syscall.ENETUNREACH) ||
+		errors.Is(err, io.EOF) ||
+		errors.Is(err, io.ErrUnexpectedEOF)
+}
+
+func isServerUnavailable(code string) bool {
+	switch code {
+	case pgerrcode.AdminShutdown, pgerrcode.CrashShutdown, pgerrcode.CannotConnectNow:
+		return true
+	default:
+		return false
+	}
+}
+
+func isRetriableWrite(err error) bool {
+	var connErr *pgconn.ConnectError
+	return errors.As(err, &connErr) && IsRetriable(err)
+}
+
+var errCommit = errors.New("commit")
+
+func isRetriableTx(err error) bool {
+	return IsRetriable(err) && !errors.Is(err, errCommit)
+}
+
+func (s *PostgresStorage) retry(ctx context.Context, fn func(ctx context.Context) error) error {
+	return s.retryIf(ctx, IsRetriable, fn)
+}
+
+func (s *PostgresStorage) retryIf(ctx context.Context, retriable func(error) bool, fn func(ctx context.Context) error) error {
+	waitCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	defer context.AfterFunc(s.stopping, cancel)()
+
+	return retry.Do(waitCtx, s.delays, retriable, func() error { return fn(ctx) })
 }
 
 const (
@@ -128,7 +208,11 @@ const (
 )
 
 func (s *PostgresStorage) UpdateGauge(ctx context.Context, name string, value float64) error {
-	if _, err := s.db.ExecContext(ctx, upsertGauge, name, value); err != nil {
+	err := s.retry(ctx, func(ctx context.Context) error {
+		_, err := s.db.ExecContext(ctx, upsertGauge, name, value)
+		return err
+	})
+	if err != nil {
 		return fmt.Errorf("update gauge %s: %w", name, err)
 	}
 
@@ -138,7 +222,10 @@ func (s *PostgresStorage) UpdateGauge(ctx context.Context, name string, value fl
 func (s *PostgresStorage) UpdateCounter(ctx context.Context, name string, delta int64) (int64, error) {
 	var value int64
 
-	if err := s.db.GetContext(ctx, &value, upsertCounter+` RETURNING delta`, name, delta); err != nil {
+	err := s.retryIf(ctx, isRetriableWrite, func(ctx context.Context) error {
+		return s.db.GetContext(ctx, &value, upsertCounter+` RETURNING delta`, name, delta)
+	})
+	if err != nil {
 		return 0, fmt.Errorf("update counter %s: %w", name, counterError(err))
 	}
 
@@ -155,37 +242,49 @@ func (s *PostgresStorage) UpdateBatch(ctx context.Context, metrics []models.Metr
 		return nil
 	}
 
-	conn, err := s.db.Conn(ctx)
-	if err != nil {
-		return fmt.Errorf("update batch: acquire connection: %w", err)
-	}
-
-	defer func() {
-		err = errors.Join(err, conn.Close())
-	}()
-
-	// pgx.Batch доступен только на нативном соединении pgx, поэтому
-	// достаём его из database/sql на время транзакции.
-	err = conn.Raw(func(driverConn any) error {
-		pc, ok := driverConn.(*stdlib.Conn)
-		if !ok {
-			return fmt.Errorf("unexpected driver connection %T", driverConn)
-		}
-
-		return pgx.BeginFunc(ctx, pc.Conn(), func(tx pgx.Tx) error {
-			return upsertBatch(ctx, tx, gauges, counters)
-		})
-	})
-	if err != nil {
+	if err := s.retryIf(ctx, isRetriableTx, func(ctx context.Context) error {
+		return s.updateBatchTx(ctx, gauges, counters)
+	}); err != nil {
 		return fmt.Errorf("update batch: %w", err)
 	}
 
 	return nil
 }
 
-// upsertBatch отправляет все upsert-ы одним pgx.Batch — за один round-trip.
-// Имена сортируются, чтобы параллельные батчи брали блокировки строк
-// в одном порядке и не уходили в дедлок.
+func (s *PostgresStorage) updateBatchTx(ctx context.Context, gauges map[string]float64, counters map[string]int64) (err error) {
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire connection: %w", err)
+	}
+
+	defer func() {
+		err = errors.Join(err, conn.Close())
+	}()
+
+	return conn.Raw(func(driverConn any) error {
+		pc, ok := driverConn.(*stdlib.Conn)
+		if !ok {
+			return fmt.Errorf("unexpected driver connection %T", driverConn)
+		}
+
+		tx, err := pc.Conn().Begin(ctx)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = tx.Rollback(ctx) }()
+
+		if err := upsertBatch(ctx, tx, gauges, counters); err != nil {
+			return err
+		}
+
+		if err := tx.Commit(ctx); err != nil {
+			return fmt.Errorf("%w: %w", errCommit, err)
+		}
+
+		return nil
+	})
+}
+
 func upsertBatch(ctx context.Context, tx pgx.Tx, gauges map[string]float64, counters map[string]int64) (err error) {
 	gaugeNames := slices.Sorted(maps.Keys(gauges))
 	counterNames := slices.Sorted(maps.Keys(counters))
@@ -203,7 +302,6 @@ func upsertBatch(ctx context.Context, tx pgx.Tx, gauges map[string]float64, coun
 		err = errors.Join(err, br.Close())
 	}()
 
-	// Результаты читаются по очереди, чтобы в ошибке было имя метрики.
 	for _, name := range gaugeNames {
 		if _, err := br.Exec(); err != nil {
 			return fmt.Errorf("gauge %s: %w", name, err)
@@ -218,14 +316,9 @@ func upsertBatch(ctx context.Context, tx pgx.Tx, gauges map[string]float64, coun
 	return nil
 }
 
-// pgNumericValueOutOfRange — SQLSTATE 22003, в том числе переполнение bigint.
-const pgNumericValueOutOfRange = "22003"
-
-// counterError приводит переполнение bigint к ErrCounterOverflow,
-// чтобы оно обрабатывалось так же, как в MemStorage.
 func counterError(err error) error {
 	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) && pgErr.Code == pgNumericValueOutOfRange {
+	if errors.As(err, &pgErr) && pgErr.Code == pgerrcode.NumericValueOutOfRange {
 		return fmt.Errorf("%w: %w", models.ErrCounterOverflow, err)
 	}
 
@@ -235,7 +328,9 @@ func counterError(err error) error {
 func (s *PostgresStorage) Gauge(ctx context.Context, name string) (float64, bool, error) {
 	var value float64
 
-	err := s.db.GetContext(ctx, &value, `SELECT value FROM gauges WHERE name = $1`, name)
+	err := s.retry(ctx, func(ctx context.Context) error {
+		return s.db.GetContext(ctx, &value, `SELECT value FROM gauges WHERE name = $1`, name)
+	})
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, false, nil
 	}
@@ -250,7 +345,9 @@ func (s *PostgresStorage) Gauge(ctx context.Context, name string) (float64, bool
 func (s *PostgresStorage) Counter(ctx context.Context, name string) (int64, bool, error) {
 	var delta int64
 
-	err := s.db.GetContext(ctx, &delta, `SELECT delta FROM counters WHERE name = $1`, name)
+	err := s.retry(ctx, func(ctx context.Context) error {
+		return s.db.GetContext(ctx, &delta, `SELECT delta FROM counters WHERE name = $1`, name)
+	})
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, false, nil
 	}
@@ -268,7 +365,11 @@ func (s *PostgresStorage) Gauges(ctx context.Context) (map[string]float64, error
 		Value float64 `db:"value"`
 	}
 
-	if err := s.db.SelectContext(ctx, &rows, `SELECT name, value FROM gauges`); err != nil {
+	err := s.retry(ctx, func(ctx context.Context) error {
+		rows = nil
+		return s.db.SelectContext(ctx, &rows, `SELECT name, value FROM gauges`)
+	})
+	if err != nil {
 		return nil, fmt.Errorf("list gauges: %w", err)
 	}
 
@@ -286,7 +387,11 @@ func (s *PostgresStorage) Counters(ctx context.Context) (map[string]int64, error
 		Delta int64  `db:"delta"`
 	}
 
-	if err := s.db.SelectContext(ctx, &rows, `SELECT name, delta FROM counters`); err != nil {
+	err := s.retry(ctx, func(ctx context.Context) error {
+		rows = nil
+		return s.db.SelectContext(ctx, &rows, `SELECT name, delta FROM counters`)
+	})
+	if err != nil {
 		return nil, fmt.Errorf("list counters: %w", err)
 	}
 
@@ -302,10 +407,15 @@ func (s *PostgresStorage) PingContext(ctx context.Context) error {
 	return s.db.PingContext(ctx)
 }
 
-func (s *PostgresStorage) Run(context.Context) error {
+func (s *PostgresStorage) Run(ctx context.Context) error {
+	<-ctx.Done()
+	s.stop()
+
 	return nil
 }
 
 func (s *PostgresStorage) Close() error {
+	s.stop()
+
 	return s.db.Close()
 }

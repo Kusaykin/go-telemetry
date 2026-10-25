@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -20,7 +22,7 @@ import (
 
 const (
 	shutdownTimeout = 5 * time.Second
-	connectTimeout  = 10 * time.Second
+	dbStartTimeout  = 10 * time.Second
 )
 
 func main() {
@@ -60,6 +62,13 @@ func run(ctx context.Context, cfg config.Server, log *zap.Logger) error {
 
 	srv := newServer(cfg, store, db, log)
 
+	var handlers inflight
+	srv.Handler = handlers.wrap(srv.Handler)
+
+	reqCtx, cancelRequests := context.WithCancel(context.Background())
+	defer cancelRequests()
+	srv.BaseContext = func(net.Listener) context.Context { return reqCtx }
+
 	g, gctx := errgroup.WithContext(ctx)
 
 	g.Go(func() error {
@@ -80,10 +89,42 @@ func run(ctx context.Context, cfg config.Server, log *zap.Logger) error {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 		defer cancel()
 
-		return srv.Shutdown(shutdownCtx)
+		err := srv.Shutdown(shutdownCtx)
+		if errors.Is(err, context.DeadlineExceeded) {
+			log.Warn("shutdown timed out, cancelling in-flight requests")
+			cancelRequests()
+			err = errors.Join(err, srv.Close())
+		}
+
+		if err != nil {
+			return fmt.Errorf("graceful shutdown: %w", err)
+		}
+
+		return nil
 	})
 
-	return errors.Join(g.Wait(), store.Close())
+	err = g.Wait()
+
+	handlers.wait()
+
+	return errors.Join(err, store.Close())
+}
+
+type inflight struct {
+	wg sync.WaitGroup
+}
+
+func (f *inflight) wrap(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		f.wg.Add(1)
+		defer f.wg.Done()
+
+		next.ServeHTTP(w, r)
+	})
+}
+
+func (f *inflight) wait() {
+	f.wg.Wait()
 }
 
 type storageKind string
@@ -120,14 +161,14 @@ func openStorage(ctx context.Context, cfg config.Server, log *zap.Logger) (stora
 		return nil, nil, err
 	}
 
-	connectCtx, cancel := context.WithTimeout(ctx, connectTimeout)
+	startCtx, cancel := context.WithTimeout(ctx, dbStartTimeout)
 	defer cancel()
 
-	if err := db.PingContext(connectCtx); err != nil {
+	if err := db.PingContext(startCtx); err != nil {
 		return nil, nil, errors.Join(fmt.Errorf("connect postgres: %w", err), db.Close())
 	}
 
-	if err := repository.Migrate(connectCtx, db); err != nil {
+	if err := repository.Migrate(startCtx, db); err != nil {
 		return nil, nil, errors.Join(err, db.Close())
 	}
 
