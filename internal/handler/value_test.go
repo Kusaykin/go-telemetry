@@ -92,3 +92,55 @@ func TestUpdateThenValue(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code)
 	assert.Equal(t, "12.5", rec.Body.String())
 }
+
+func TestValueJSON(t *testing.T) {
+	store := newFakeStorage()
+	store.UpdateGauge("LastGC", 1744184459)
+	store.UpdateCounter("PollCount", 15)
+
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{"gauge", `{"id":"LastGC","type":"gauge"}`, `{"id":"LastGC","type":"gauge","value":1744184459}`},
+		{"counter", `{"id":"PollCount","type":"counter"}`, `{"id":"PollCount","type":"counter","delta":15}`},
+		{"лишнее значение в запросе игнорируется", `{"id":"PollCount","type":"counter","value":1}`, `{"id":"PollCount","type":"counter","delta":15}`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := doBody(store, http.MethodPost, "/value", tt.body)
+
+			require.Equal(t, http.StatusOK, rec.Code)
+			assert.Equal(t, "application/json", rec.Header().Get("Content-Type"))
+			assert.JSONEq(t, tt.want, rec.Body.String())
+		})
+	}
+}
+
+func TestValueJSONErrors(t *testing.T) {
+	store := newFakeStorage()
+	store.UpdateGauge("Alloc", 1)
+
+	tests := []struct {
+		name string
+		body string
+		want int
+	}{
+		{"битый JSON", `{"id":`, http.StatusBadRequest},
+		{"пустое тело", ``, http.StatusBadRequest},
+		{"тело null", `null`, http.StatusBadRequest},
+		{"нет такой метрики", `{"id":"Unknown","type":"gauge"}`, http.StatusNotFound},
+		{"метрика другого типа", `{"id":"Alloc","type":"counter"}`, http.StatusNotFound},
+		{"неизвестный тип", `{"id":"Alloc","type":"histogram"}`, http.StatusNotFound},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := doBody(store, http.MethodPost, "/value", tt.body)
+
+			assert.Equal(t, tt.want, rec.Code)
+		})
+	}
+}

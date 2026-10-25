@@ -24,15 +24,15 @@ func DefaultAgent() Agent {
 	}
 }
 
-func LoadAgent(args []string, errOut io.Writer) (Agent, error) {
+func LoadAgent(args []string, lookup LookupEnv, errOut io.Writer) (Agent, error) {
 	cfg := DefaultAgent()
 
 	fs := newFlagSet("agent", errOut)
-	fs.StringVar(&cfg.Address, "a", cfg.Address, addressUsage)
-	secondsVar(fs, &cfg.ReportInterval, "r", "частота отправки метрик на сервер, `секунды`")
-	secondsVar(fs, &cfg.PollInterval, "p", "частота опроса метрик из runtime, `секунды`")
+	fs.stringVar(&cfg.Address, "a", envAddress, addressUsage)
+	fs.secondsVar(&cfg.ReportInterval, "r", envReportInterval, "частота отправки метрик на сервер, `секунды`")
+	fs.secondsVar(&cfg.PollInterval, "p", envPollInterval, "частота опроса метрик из runtime, `секунды`")
 
-	if err := parse(fs, args, errOut); err != nil {
+	if err := fs.parse(args, lookup); err != nil {
 		return Agent{}, err
 	}
 

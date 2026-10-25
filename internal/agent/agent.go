@@ -1,37 +1,49 @@
 package agent
 
 import (
-	"fmt"
-	"io"
-	"log"
-	"os"
+	"context"
 	"time"
 
 	"github.com/Kusaykin/go-telemetry/internal/config"
 	models "github.com/Kusaykin/go-telemetry/internal/model"
+	"go.uber.org/zap"
 )
 
 type Agent struct {
 	cfg       config.Agent
 	collector *Collector
 	client    *Client
-	out       io.Writer
+	log       *zap.Logger
 	elapsed   time.Duration // время, прошедшее с последнего отчёта
 }
 
-func New(cfg config.Agent) *Agent {
+func New(cfg config.Agent, log *zap.Logger) *Agent {
 	return &Agent{
 		cfg:       cfg,
 		collector: NewCollector(),
 		client:    NewClient(cfg.Address),
-		out:       os.Stdout,
+		log:       log,
 	}
 }
 
-func (a *Agent) Run() {
+func (a *Agent) Run(ctx context.Context) {
+	a.log.Info("starting agent",
+		zap.String("address", a.cfg.Address),
+		zap.Duration("poll_interval", a.cfg.PollInterval),
+		zap.Duration("report_interval", a.cfg.ReportInterval),
+	)
+
+	ticker := time.NewTicker(a.cfg.PollInterval)
+	defer ticker.Stop()
+
 	for {
-		time.Sleep(a.cfg.PollInterval)
-		a.tick()
+		select {
+		case <-ctx.Done():
+			a.log.Info("stopping agent")
+			return
+		case <-ticker.C:
+			a.tick()
+		}
 	}
 }
 
@@ -50,7 +62,7 @@ func (a *Agent) tick() {
 	a.logReport(snapshot)
 
 	if err := a.client.SendAll(snapshot); err != nil {
-		log.Println("report failed:", err)
+		a.log.Error("report failed", zap.Error(err))
 		return
 	}
 
@@ -58,14 +70,22 @@ func (a *Agent) tick() {
 }
 
 func (a *Agent) logReport(snapshot []models.Metrics) {
-	fmt.Fprintf(a.out, "--- отчёт, метрик: %d ---\n", len(snapshot))
+	a.log.Info("report", zap.Int("metrics", len(snapshot)))
 
 	for _, m := range snapshot {
 		value, err := m.ValueString()
 		if err != nil {
-			fmt.Fprintf(a.out, "%-7s %-14s ошибка: %v\n", m.MType, m.ID, err)
+			a.log.Error("metric",
+				zap.String("type", m.MType),
+				zap.String("id", m.ID),
+				zap.Error(err),
+			)
 			continue
 		}
-		fmt.Fprintf(a.out, "%-7s %-14s %s\n", m.MType, m.ID, value)
+		a.log.Debug("metric",
+			zap.String("type", m.MType),
+			zap.String("id", m.ID),
+			zap.String("value", value),
+		)
 	}
 }

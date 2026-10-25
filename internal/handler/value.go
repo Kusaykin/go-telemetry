@@ -40,3 +40,35 @@ func (h *Handler) Value(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 }
+
+func (h *Handler) ValueJSON(w http.ResponseWriter, r *http.Request) {
+	req, err := decodeMetric(w, r)
+	if err != nil {
+		w.WriteHeader(decodeStatus(err))
+		return
+	}
+
+	m := models.Metrics{ID: req.ID, MType: req.MType}
+
+	switch req.MType {
+	case models.Gauge:
+		gauge, ok := h.store.Gauge(req.ID)
+		if !ok {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		m.Value = &gauge
+	case models.Counter:
+		counter, ok := h.store.Counter(req.ID)
+		if !ok {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		m.Delta = &counter
+	default:
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+
+	writeJSON(w, m)
+}

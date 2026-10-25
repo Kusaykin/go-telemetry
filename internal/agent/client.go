@@ -3,15 +3,19 @@ package agent
 import (
 	"fmt"
 	"net/http"
-	"net/url"
 	"time"
 
 	"github.com/go-resty/resty/v2"
+	"github.com/mailru/easyjson"
 
+	"github.com/Kusaykin/go-telemetry/internal/compress"
 	models "github.com/Kusaykin/go-telemetry/internal/model"
 )
 
-const requestTimeout = 5 * time.Second
+const (
+	requestTimeout  = 5 * time.Second
+	contentTypeJSON = "application/json"
+)
 
 type Client struct {
 	rest *resty.Client
@@ -22,7 +26,7 @@ func NewClient(addr string) *Client {
 		rest: resty.New().
 			SetBaseURL("http://"+addr).
 			SetTimeout(requestTimeout).
-			SetHeader("Content-Type", "text/plain"),
+			SetHeader("Content-Type", contentTypeJSON),
 	}
 }
 
@@ -37,14 +41,24 @@ func (c *Client) SendAll(metrics []models.Metrics) error {
 }
 
 func (c *Client) Send(m models.Metrics) error {
-	value, err := m.ValueString()
-	if err != nil {
+	if err := m.Validate(); err != nil {
 		return err
 	}
 
-	path := "/update/" + url.PathEscape(m.MType) + "/" + url.PathEscape(m.ID) + "/" + url.PathEscape(value)
+	body, err := easyjson.Marshal(m)
+	if err != nil {
+		return fmt.Errorf("send %s: %w", m.ID, err)
+	}
 
-	resp, err := c.rest.R().Post(path)
+	body, err = compress.Compress(body)
+	if err != nil {
+		return fmt.Errorf("send %s: %w", m.ID, err)
+	}
+
+	resp, err := c.rest.R().
+		SetHeader("Content-Encoding", "gzip").
+		SetBody(body).
+		Post("/update")
 	if err != nil {
 		return fmt.Errorf("send %s: %w", m.ID, err)
 	}

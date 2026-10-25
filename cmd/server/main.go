@@ -1,35 +1,90 @@
 package main
 
 import (
-	"log"
+	"context"
+	"errors"
+	"fmt"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
 	"github.com/Kusaykin/go-telemetry/internal/config"
 	"github.com/Kusaykin/go-telemetry/internal/handler"
+	"github.com/Kusaykin/go-telemetry/internal/logger"
 	"github.com/Kusaykin/go-telemetry/internal/repository"
+	"go.uber.org/zap"
+	"golang.org/x/sync/errgroup"
 )
 
+const shutdownTimeout = 5 * time.Second
+
 func main() {
-	cfg, err := config.LoadServer(os.Args[1:], os.Stderr)
+	cfg, err := config.LoadServer(os.Args[1:], os.LookupEnv, os.Stderr)
 	if err != nil {
 		os.Exit(config.ExitCode(err))
 	}
 
-	if err := run(cfg); err != nil {
-		log.Fatal(err)
+	log, err := logger.NewJSON("info")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	defer log.Sync()
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	if err := run(ctx, cfg, log); err != nil {
+		log.Fatal("server stopped", zap.Error(err))
 	}
 }
 
-func run(cfg config.Server) error {
-	return newServer(cfg).ListenAndServe()
+func run(ctx context.Context, cfg config.Server, log *zap.Logger) error {
+	store, err := repository.NewFileStorage(cfg.FileStoragePath, cfg.StoreInterval, cfg.Restore, log)
+	if err != nil {
+		return err
+	}
+
+	log.Info("starting server",
+		zap.String("address", cfg.Address),
+		zap.Duration("store_interval", cfg.StoreInterval),
+		zap.String("file_storage_path", cfg.FileStoragePath),
+		zap.Bool("restore", cfg.Restore),
+	)
+
+	srv := newServer(cfg, store, log)
+
+	g, gctx := errgroup.WithContext(ctx)
+
+	g.Go(func() error {
+		if err := srv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
+			return err
+		}
+		return nil
+	})
+
+	g.Go(func() error {
+		return store.Run(gctx)
+	})
+
+	g.Go(func() error {
+		<-gctx.Done()
+		log.Info("shutting down server")
+
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+		defer cancel()
+
+		return srv.Shutdown(shutdownCtx)
+	})
+
+	return errors.Join(g.Wait(), store.Save())
 }
 
-func newServer(cfg config.Server) *http.Server {
-	store := repository.NewMemStorage()
-
+func newServer(cfg config.Server, store handler.Storage, log *zap.Logger) *http.Server {
 	return &http.Server{
 		Addr:    cfg.Address,
-		Handler: handler.NewRouter(store),
+		Handler: handler.NewRouter(store, log),
 	}
 }
