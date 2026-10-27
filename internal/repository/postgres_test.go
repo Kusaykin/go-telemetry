@@ -2,7 +2,6 @@ package repository
 
 import (
 	"context"
-	"database/sql/driver"
 	"errors"
 	"fmt"
 	"io"
@@ -19,7 +18,7 @@ import (
 	migratepg "github.com/golang-migrate/migrate/v4/database/postgres"
 	"github.com/jackc/pgerrcode"
 	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/jmoiron/sqlx"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -29,39 +28,31 @@ import (
 
 func TestNewPostgres(t *testing.T) {
 	t.Run("валидный DSN открывается без подключения к БД", func(t *testing.T) {
-		db, err := NewPostgres("postgres://127.0.0.1:1/metrics?sslmode=disable")
+		db, err := NewPostgres(t.Context(), "postgres://127.0.0.1:1/metrics?sslmode=disable")
 		require.NoError(t, err)
-		t.Cleanup(func() { db.Close() })
+		t.Cleanup(db.Close)
 
-		assert.Equal(t, "pgx", db.DriverName())
+		assert.Zero(t, db.Stat().TotalConns())
 	})
 
-	t.Run("некорректный DSN проявляется при ping, а не при открытии", func(t *testing.T) {
-		db, err := NewPostgres("host=localhost port=abc")
-		require.NoError(t, err)
-		t.Cleanup(func() { db.Close() })
-
-		assert.Error(t, db.PingContext(t.Context()))
+	t.Run("некорректный DSN отклоняется при открытии", func(t *testing.T) {
+		_, err := NewPostgres(t.Context(), "host=localhost port=abc")
+		assert.Error(t, err)
 	})
 }
 
-func openPostgres(t *testing.T, dsn string) *sqlx.DB {
+func openPostgres(t *testing.T, dsn string) *pgxpool.Pool {
 	t.Helper()
 
-	db, err := NewPostgres(dsn)
+	db, err := NewPostgres(t.Context(), dsn)
 	require.NoError(t, err)
-	t.Cleanup(func() { db.Close() })
+	t.Cleanup(db.Close)
 
 	return db
 }
 
 func TestMigrateFailsWithoutDatabase(t *testing.T) {
 	db := openPostgres(t, "postgres://127.0.0.1:1/metrics?sslmode=disable&connect_timeout=1")
-	assert.Error(t, Migrate(t.Context(), db))
-}
-
-func TestMigrateFailsOnInvalidDSN(t *testing.T) {
-	db := openPostgres(t, "host=localhost port=abc")
 	assert.Error(t, Migrate(t.Context(), db))
 }
 
@@ -98,21 +89,21 @@ func TestMigrateRespectsDeadlineWhileLockIsHeld(t *testing.T) {
 
 	// Держим тот же advisory lock, что берёт golang-migrate, на отдельном
 	// соединении: pg_advisory_lock привязан к сессии.
-	conn, err := db.Conn(t.Context())
+	conn, err := db.Acquire(t.Context())
 	require.NoError(t, err)
-	t.Cleanup(func() { conn.Close() })
+	t.Cleanup(conn.Release)
 
 	var dbName, schema string
-	require.NoError(t, conn.QueryRowContext(t.Context(),
+	require.NoError(t, conn.QueryRow(t.Context(),
 		`SELECT current_database(), current_schema()`).Scan(&dbName, &schema))
 
 	lockID, err := database.GenerateAdvisoryLockId(dbName, schema, migratepg.DefaultMigrationsTable)
 	require.NoError(t, err)
 
-	_, err = conn.ExecContext(t.Context(), `SELECT pg_advisory_lock($1)`, lockID)
+	_, err = conn.Exec(t.Context(), `SELECT pg_advisory_lock($1)`, lockID)
 	require.NoError(t, err)
 	t.Cleanup(func() {
-		_, _ = conn.ExecContext(context.Background(), `SELECT pg_advisory_unlock($1)`, lockID)
+		_, _ = conn.Exec(context.Background(), `SELECT pg_advisory_unlock($1)`, lockID)
 	})
 
 	ctx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
@@ -125,18 +116,23 @@ func TestMigrateRespectsDeadlineWhileLockIsHeld(t *testing.T) {
 	assert.Less(t, time.Since(start), 3*time.Second)
 }
 
-func TestMigrateKeepsPoolAndResetsSession(t *testing.T) {
+func TestMigrateKeepsPoolAndSession(t *testing.T) {
 	dsn := os.Getenv("TEST_DATABASE_DSN")
 	if dsn == "" {
 		t.Skip("TEST_DATABASE_DSN не задана")
 	}
 
-	// Одно соединение в пуле: миграции и проверка ниже идут через одну сессию.
-	db := openPostgres(t, dsn)
-	db.SetMaxOpenConns(1)
+	// Одно соединение в пуле: проверки до и после миграций идут через одну сессию.
+	cfg, err := pgxpool.ParseConfig(dsn)
+	require.NoError(t, err)
+	cfg.MaxConns = 1
+
+	db, err := pgxpool.NewWithConfig(t.Context(), cfg)
+	require.NoError(t, err)
+	t.Cleanup(db.Close)
 
 	var defaultLockTimeout string
-	require.NoError(t, db.GetContext(t.Context(), &defaultLockTimeout, `SHOW lock_timeout`))
+	require.NoError(t, db.QueryRow(t.Context(), `SHOW lock_timeout`).Scan(&defaultLockTimeout))
 
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
@@ -144,9 +140,9 @@ func TestMigrateKeepsPoolAndResetsSession(t *testing.T) {
 	require.NoError(t, Migrate(ctx, db))
 
 	var lockTimeout string
-	require.NoError(t, db.GetContext(t.Context(), &lockTimeout, `SHOW lock_timeout`),
+	require.NoError(t, db.QueryRow(t.Context(), `SHOW lock_timeout`).Scan(&lockTimeout),
 		"пул должен остаться открытым после миграций")
-	assert.Equal(t, defaultLockTimeout, lockTimeout, "lock_timeout миграций не должен оставаться в сессии")
+	assert.Equal(t, defaultLockTimeout, lockTimeout, "lock_timeout миграций не должен попадать в сессии пула")
 }
 
 // newPostgresStorage подключается к БД из TEST_DATABASE_DSN, применяет
@@ -165,7 +161,7 @@ func newPostgresStorage(t *testing.T) *PostgresStorage {
 	require.NoError(t, Migrate(t.Context(), db), "повторный запуск миграций не должен падать")
 
 	truncate := func() {
-		_, err := db.Exec(`TRUNCATE gauges, counters`)
+		_, err := db.Exec(context.Background(), `TRUNCATE gauges, counters`)
 		require.NoError(t, err)
 	}
 
@@ -348,7 +344,6 @@ func TestIsRetriable(t *testing.T) {
 			io.EOF,
 			io.ErrUnexpectedEOF,
 			&net.OpError{Op: "read", Net: "tcp", Err: syscall.ECONNRESET},
-			driver.ErrBadConn,
 		} {
 			assert.True(t, IsRetriable(fmt.Errorf("wrapped: %w", err)), err.Error())
 		}
@@ -366,12 +361,12 @@ func TestIsRetriable(t *testing.T) {
 
 	t.Run("неудачное подключение повторяется", func(t *testing.T) {
 		db := openPostgres(t, "postgres://127.0.0.1:1/metrics?sslmode=disable&connect_timeout=1")
-		assert.True(t, IsRetriable(db.PingContext(t.Context())))
+		assert.True(t, IsRetriable(db.Ping(t.Context())))
 	})
 
 	t.Run("несуществующий хост не повторяется", func(t *testing.T) {
 		db := openPostgres(t, "postgres://no-such-host.invalid:5432/metrics?sslmode=disable&connect_timeout=1")
-		err := db.PingContext(t.Context())
+		err := db.Ping(t.Context())
 
 		var dnsErr *net.DNSError
 		require.ErrorAs(t, err, &dnsErr)

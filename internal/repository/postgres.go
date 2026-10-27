@@ -2,8 +2,6 @@ package repository
 
 import (
 	"context"
-	"database/sql"
-	"database/sql/driver"
 	"errors"
 	"fmt"
 	"io"
@@ -20,26 +18,24 @@ import (
 	"github.com/jackc/pgerrcode"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jackc/pgx/v5/stdlib"
-	"github.com/jmoiron/sqlx"
 
 	models "github.com/Kusaykin/go-telemetry/internal/model"
 	"github.com/Kusaykin/go-telemetry/internal/retry"
 	"github.com/Kusaykin/go-telemetry/migrations"
 )
 
-func NewPostgres(dsn string) (*sqlx.DB, error) {
-	db, err := sqlx.Open("pgx", dsn)
+func NewPostgres(ctx context.Context, dsn string) (*pgxpool.Pool, error) {
+	pool, err := pgxpool.New(ctx, dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open postgres: %w", err)
 	}
 
-	return db, nil
+	return pool, nil
 }
 
-const migrationConnResetTimeout = 5 * time.Second
-
-func Migrate(ctx context.Context, db *sqlx.DB) (err error) {
+func Migrate(ctx context.Context, pool *pgxpool.Pool) (err error) {
 	driverCfg := &migratepg.Config{}
 
 	deadline, hasDeadline := ctx.Deadline()
@@ -54,13 +50,18 @@ func Migrate(ctx context.Context, db *sqlx.DB) (err error) {
 		driverCfg.StatementTimeout = timeout
 	}
 
+	db := stdlib.OpenDB(*pool.Config().ConnConfig)
+	defer func() {
+		err = errors.Join(err, db.Close())
+	}()
+
 	conn, err := db.Conn(ctx)
 	if err != nil {
 		return fmt.Errorf("acquire migration connection: %w", err)
 	}
 
 	defer func() {
-		err = errors.Join(err, releaseMigrationConn(conn, hasDeadline))
+		err = errors.Join(err, conn.Close())
 	}()
 
 	if hasDeadline {
@@ -100,31 +101,15 @@ func Migrate(ctx context.Context, db *sqlx.DB) (err error) {
 	return nil
 }
 
-func releaseMigrationConn(conn *sql.Conn, resetSession bool) error {
-	if !resetSession {
-		return conn.Close()
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), migrationConnResetTimeout)
-	defer cancel()
-
-	if _, err := conn.ExecContext(ctx, `RESET lock_timeout`); err != nil {
-		_ = conn.Raw(func(any) error { return driver.ErrBadConn })
-		return fmt.Errorf("reset migration lock timeout: %w", err)
-	}
-
-	return conn.Close()
-}
-
 type PostgresStorage struct {
-	db     *sqlx.DB
+	db     *pgxpool.Pool
 	delays []time.Duration
 
 	stopping context.Context
 	stop     context.CancelFunc
 }
 
-func NewPostgresStorage(db *sqlx.DB) *PostgresStorage {
+func NewPostgresStorage(db *pgxpool.Pool) *PostgresStorage {
 	stopping, stop := context.WithCancel(context.Background())
 
 	return &PostgresStorage{db: db, delays: retry.Delays(), stopping: stopping, stop: stop}
@@ -143,8 +128,7 @@ func IsRetriable(err error) bool {
 
 	return errors.Is(err, io.EOF) ||
 		errors.Is(err, io.ErrUnexpectedEOF) ||
-		errors.Is(err, syscall.ECONNRESET) ||
-		errors.Is(err, driver.ErrBadConn)
+		errors.Is(err, syscall.ECONNRESET)
 }
 
 func isTransientConnect(err *pgconn.ConnectError) bool {
@@ -209,7 +193,7 @@ const (
 
 func (s *PostgresStorage) UpdateGauge(ctx context.Context, name string, value float64) error {
 	err := s.retry(ctx, func(ctx context.Context) error {
-		_, err := s.db.ExecContext(ctx, upsertGauge, name, value)
+		_, err := s.db.Exec(ctx, upsertGauge, name, value)
 		return err
 	})
 	if err != nil {
@@ -223,7 +207,7 @@ func (s *PostgresStorage) UpdateCounter(ctx context.Context, name string, delta 
 	var value int64
 
 	err := s.retryIf(ctx, isRetriableWrite, func(ctx context.Context) error {
-		return s.db.GetContext(ctx, &value, upsertCounter+` RETURNING delta`, name, delta)
+		return s.db.QueryRow(ctx, upsertCounter+` RETURNING delta`, name, delta).Scan(&value)
 	})
 	if err != nil {
 		return 0, fmt.Errorf("update counter %s: %w", name, counterError(err))
@@ -251,38 +235,22 @@ func (s *PostgresStorage) UpdateBatch(ctx context.Context, metrics []models.Metr
 	return nil
 }
 
-func (s *PostgresStorage) updateBatchTx(ctx context.Context, gauges map[string]float64, counters map[string]int64) (err error) {
-	conn, err := s.db.Conn(ctx)
+func (s *PostgresStorage) updateBatchTx(ctx context.Context, gauges map[string]float64, counters map[string]int64) error {
+	tx, err := s.db.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("acquire connection: %w", err)
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if err := upsertBatch(ctx, tx, gauges, counters); err != nil {
+		return err
 	}
 
-	defer func() {
-		err = errors.Join(err, conn.Close())
-	}()
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("%w: %w", errCommit, err)
+	}
 
-	return conn.Raw(func(driverConn any) error {
-		pc, ok := driverConn.(*stdlib.Conn)
-		if !ok {
-			return fmt.Errorf("unexpected driver connection %T", driverConn)
-		}
-
-		tx, err := pc.Conn().Begin(ctx)
-		if err != nil {
-			return err
-		}
-		defer func() { _ = tx.Rollback(ctx) }()
-
-		if err := upsertBatch(ctx, tx, gauges, counters); err != nil {
-			return err
-		}
-
-		if err := tx.Commit(ctx); err != nil {
-			return fmt.Errorf("%w: %w", errCommit, err)
-		}
-
-		return nil
-	})
+	return nil
 }
 
 func upsertBatch(ctx context.Context, tx pgx.Tx, gauges map[string]float64, counters map[string]int64) (err error) {
@@ -329,9 +297,9 @@ func (s *PostgresStorage) Gauge(ctx context.Context, name string) (float64, bool
 	var value float64
 
 	err := s.retry(ctx, func(ctx context.Context) error {
-		return s.db.GetContext(ctx, &value, `SELECT value FROM gauges WHERE name = $1`, name)
+		return s.db.QueryRow(ctx, `SELECT value FROM gauges WHERE name = $1`, name).Scan(&value)
 	})
-	if errors.Is(err, sql.ErrNoRows) {
+	if errors.Is(err, pgx.ErrNoRows) {
 		return 0, false, nil
 	}
 
@@ -346,9 +314,9 @@ func (s *PostgresStorage) Counter(ctx context.Context, name string) (int64, bool
 	var delta int64
 
 	err := s.retry(ctx, func(ctx context.Context) error {
-		return s.db.GetContext(ctx, &delta, `SELECT delta FROM counters WHERE name = $1`, name)
+		return s.db.QueryRow(ctx, `SELECT delta FROM counters WHERE name = $1`, name).Scan(&delta)
 	})
-	if errors.Is(err, sql.ErrNoRows) {
+	if errors.Is(err, pgx.ErrNoRows) {
 		return 0, false, nil
 	}
 
@@ -360,51 +328,58 @@ func (s *PostgresStorage) Counter(ctx context.Context, name string) (int64, bool
 }
 
 func (s *PostgresStorage) Gauges(ctx context.Context) (map[string]float64, error) {
-	var rows []struct {
-		Name  string  `db:"name"`
-		Value float64 `db:"value"`
-	}
+	var gauges map[string]float64
 
-	err := s.retry(ctx, func(ctx context.Context) error {
-		rows = nil
-		return s.db.SelectContext(ctx, &rows, `SELECT name, value FROM gauges`)
+	err := s.retry(ctx, func(ctx context.Context) (err error) {
+		gauges, err = queryMap[float64](ctx, s.db, `SELECT name, value FROM gauges`)
+		return err
 	})
 	if err != nil {
 		return nil, fmt.Errorf("list gauges: %w", err)
-	}
-
-	gauges := make(map[string]float64, len(rows))
-	for _, row := range rows {
-		gauges[row.Name] = row.Value
 	}
 
 	return gauges, nil
 }
 
 func (s *PostgresStorage) Counters(ctx context.Context) (map[string]int64, error) {
-	var rows []struct {
-		Name  string `db:"name"`
-		Delta int64  `db:"delta"`
-	}
+	var counters map[string]int64
 
-	err := s.retry(ctx, func(ctx context.Context) error {
-		rows = nil
-		return s.db.SelectContext(ctx, &rows, `SELECT name, delta FROM counters`)
+	err := s.retry(ctx, func(ctx context.Context) (err error) {
+		counters, err = queryMap[int64](ctx, s.db, `SELECT name, delta FROM counters`)
+		return err
 	})
 	if err != nil {
 		return nil, fmt.Errorf("list counters: %w", err)
 	}
 
-	counters := make(map[string]int64, len(rows))
-	for _, row := range rows {
-		counters[row.Name] = row.Delta
-	}
-
 	return counters, nil
 }
 
+func queryMap[V any](ctx context.Context, db *pgxpool.Pool, query string) (map[string]V, error) {
+	rows, err := db.Query(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+
+	result := make(map[string]V)
+
+	var (
+		name  string
+		value V
+	)
+
+	if _, err := pgx.ForEachRow(rows, []any{&name, &value}, func() error {
+		result[name] = value
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+
+	return result, nil
+}
+
 func (s *PostgresStorage) PingContext(ctx context.Context) error {
-	return s.db.PingContext(ctx)
+	return s.db.Ping(ctx)
 }
 
 func (s *PostgresStorage) Run(ctx context.Context) error {
@@ -416,6 +391,7 @@ func (s *PostgresStorage) Run(ctx context.Context) error {
 
 func (s *PostgresStorage) Close() error {
 	s.stop()
+	s.db.Close()
 
-	return s.db.Close()
+	return nil
 }

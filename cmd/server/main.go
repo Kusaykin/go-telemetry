@@ -156,7 +156,7 @@ func openStorage(ctx context.Context, cfg config.Server, log *zap.Logger) (stora
 		return store, store, nil
 	}
 
-	db, err := repository.NewPostgres(cfg.DatabaseDSN)
+	db, err := repository.NewPostgres(ctx, cfg.DatabaseDSN)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -164,12 +164,14 @@ func openStorage(ctx context.Context, cfg config.Server, log *zap.Logger) (stora
 	startCtx, cancel := context.WithTimeout(ctx, dbStartTimeout)
 	defer cancel()
 
-	if err := db.PingContext(startCtx); err != nil {
-		return nil, nil, errors.Join(fmt.Errorf("connect postgres: %w", err), db.Close())
+	if err := db.Ping(startCtx); err != nil {
+		db.Close()
+		return nil, nil, fmt.Errorf("connect postgres: %w", err)
 	}
 
 	if err := repository.Migrate(startCtx, db); err != nil {
-		return nil, nil, errors.Join(err, db.Close())
+		db.Close()
+		return nil, nil, err
 	}
 
 	store := repository.NewPostgresStorage(db)
