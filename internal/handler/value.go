@@ -15,14 +15,22 @@ func (h *Handler) Value(w http.ResponseWriter, r *http.Request) {
 
 	switch chi.URLParam(r, "type") {
 	case models.Gauge:
-		gauge, ok := h.store.Gauge(name)
+		gauge, ok, err := h.store.Gauge(r.Context(), name)
+		if err != nil {
+			h.storageError(w, r, err)
+			return
+		}
 		if !ok {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
 		value = models.FormatGauge(gauge)
 	case models.Counter:
-		counter, ok := h.store.Counter(name)
+		counter, ok, err := h.store.Counter(r.Context(), name)
+		if err != nil {
+			h.storageError(w, r, err)
+			return
+		}
 		if !ok {
 			w.WriteHeader(http.StatusNotFound)
 			return
@@ -52,14 +60,22 @@ func (h *Handler) ValueJSON(w http.ResponseWriter, r *http.Request) {
 
 	switch req.MType {
 	case models.Gauge:
-		gauge, ok := h.store.Gauge(req.ID)
+		gauge, ok, err := h.store.Gauge(r.Context(), req.ID)
+		if err != nil {
+			h.storageError(w, r, err)
+			return
+		}
 		if !ok {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
 		m.Value = &gauge
 	case models.Counter:
-		counter, ok := h.store.Counter(req.ID)
+		counter, ok, err := h.store.Counter(r.Context(), req.ID)
+		if err != nil {
+			h.storageError(w, r, err)
+			return
+		}
 		if !ok {
 			w.WriteHeader(http.StatusNotFound)
 			return

@@ -5,6 +5,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -16,13 +17,62 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 func TestNewServer(t *testing.T) {
-	srv := newServer(config.Server{Address: "127.0.0.1:9090"}, repository.NewMemStorage(), zap.NewNop())
+	srv := newServer(config.Server{Address: "127.0.0.1:9090"}, repository.NewMemStorage(), nil, zap.NewNop())
 
 	assert.Equal(t, "127.0.0.1:9090", srv.Addr)
 	assert.NotNil(t, srv.Handler)
+}
+
+func TestLogStartup(t *testing.T) {
+	const dsn = "postgres://127.0.0.1:1/metrics"
+
+	file := config.DefaultServer()
+
+	memory := config.DefaultServer()
+	memory.FileStoragePath = ""
+
+	pgDefaults := config.DefaultServer()
+	pgDefaults.DatabaseDSN = dsn
+
+	pgRestore := pgDefaults
+	pgRestore.Restore = true
+
+	pgPath := pgDefaults
+	pgPath.FileStoragePath = "other.json"
+
+	tests := []struct {
+		name       string
+		cfg        config.Server
+		wantFields bool
+		wantWarn   bool
+	}{
+		{"файл: параметры файла в логе", file, true, false},
+		{"память: без параметров файла", memory, false, false},
+		{"postgres с параметрами по умолчанию: без предупреждения", pgDefaults, false, false},
+		{"postgres и -r: предупреждение", pgRestore, false, true},
+		{"postgres и -f: предупреждение", pgPath, false, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			core, logs := observer.New(zapcore.InfoLevel)
+
+			logStartup(tt.cfg, zap.New(core))
+
+			started := logs.FilterMessage("starting server").All()
+			require.Len(t, started, 1)
+			_, hasPath := started[0].ContextMap()["file_storage_path"]
+			assert.Equal(t, tt.wantFields, hasPath)
+
+			warns := logs.FilterLevelExact(zapcore.WarnLevel).Len()
+			assert.Equal(t, tt.wantWarn, warns == 1)
+		})
+	}
 }
 
 func startServer(t *testing.T, store handler.Storage) string {
@@ -31,7 +81,7 @@ func startServer(t *testing.T, store handler.Storage) string {
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 
-	srv := newServer(config.DefaultServer(), store, zap.NewNop())
+	srv := newServer(config.DefaultServer(), store, nil, zap.NewNop())
 	go srv.Serve(l)
 
 	t.Cleanup(func() {
@@ -135,6 +185,18 @@ func TestRunFailsOnCorruptedFile(t *testing.T) {
 	assert.Error(t, err)
 }
 
+func TestRunFailsOnUnreachableDatabase(t *testing.T) {
+	cfg := config.Server{
+		Address:     "127.0.0.1:0",
+		DatabaseDSN: "postgres://127.0.0.1:1/metrics?sslmode=disable&connect_timeout=1",
+	}
+
+	err := run(context.Background(), cfg, zap.NewNop())
+
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "connect postgres")
+}
+
 func TestRunFailsOnBusyAddress(t *testing.T) {
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
@@ -166,4 +228,38 @@ func TestRunSavesOnShutdown(t *testing.T) {
 	data, err := os.ReadFile(path)
 	require.NoError(t, err, "при завершении метрики должны сохраняться в файл")
 	assert.JSONEq(t, "[]", string(data))
+}
+
+func TestInflightWaitsForRunningHandlers(t *testing.T) {
+	var handlers inflight
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	h := handlers.wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(started)
+		<-release
+	}))
+
+	go h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/updates/", nil))
+	<-started
+
+	waited := make(chan struct{})
+	go func() {
+		handlers.wait()
+		close(waited)
+	}()
+
+	select {
+	case <-waited:
+		t.Fatal("wait вернулся раньше завершения обработчика")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(release)
+
+	select {
+	case <-waited:
+	case <-time.After(time.Second):
+		t.Fatal("wait не дождался завершения обработчика")
+	}
 }

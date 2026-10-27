@@ -8,4 +8,8 @@
 - применять изменения в правильном порядке
 - откатывать изменения при необходимости
 
-Тема миграций будет подробно изучаться дальше по курсу.
+Миграции применяются сервером при старте библиотекой [golang-migrate](https://github.com/golang-migrate/migrate), если задан `DATABASE_DSN`.
+
+| Версия | Что делает |
+|--------|------------|
+| `001_create_metrics` | таблицы `gauges` (`double precision`) и `counters` (`bigint`): суррогатный `id` (identity, PK), `name varchar(255) UNIQUE NOT NULL` |

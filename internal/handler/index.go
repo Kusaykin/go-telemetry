@@ -31,9 +31,18 @@ var indexTemplate = template.Must(template.New("index").Parse(`<!DOCTYPE html>
 </html>
 `))
 
-func (h *Handler) Index(w http.ResponseWriter, _ *http.Request) {
-	gauges := h.store.Gauges()
-	counters := h.store.Counters()
+func (h *Handler) Index(w http.ResponseWriter, r *http.Request) {
+	gauges, err := h.store.Gauges(r.Context())
+	if err != nil {
+		h.storageError(w, r, err)
+		return
+	}
+
+	counters, err := h.store.Counters(r.Context())
+	if err != nil {
+		h.storageError(w, r, err)
+		return
+	}
 
 	page := struct {
 		Gauges   []metric

@@ -2,15 +2,21 @@ package agent
 
 import (
 	"compress/gzip"
+	"context"
 	"io"
 	"math"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"slices"
 	"sync"
+	"sync/atomic"
+	"syscall"
 	"testing"
+	"time"
 
 	models "github.com/Kusaykin/go-telemetry/internal/model"
+	"github.com/Kusaykin/go-telemetry/internal/retry"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -23,8 +29,6 @@ type request struct {
 	body            string
 }
 
-// testServer пишется из горутины HTTP-сервера, а читается из теста,
-// поэтому доступ к полям идёт только под mu.
 type testServer struct {
 	mu       sync.Mutex
 	requests []request
@@ -92,100 +96,110 @@ func counter(id string, delta int64) models.Metrics {
 	return models.Metrics{ID: id, MType: models.Counter, Delta: &delta}
 }
 
-func TestSendRequestFormat(t *testing.T) {
-	tests := []struct {
-		name   string
-		metric models.Metrics
-		want   string
-	}{
-		{"gauge", gauge("Alloc", 12.5), `{"id":"Alloc","type":"gauge","value":12.5}`},
-		{"counter", counter("PollCount", 527), `{"id":"PollCount","type":"counter","delta":527}`},
-		{"большое целое gauge", gauge("Sys", 1234567890), `{"id":"Sys","type":"gauge","value":1234567890}`},
+func TestSendBatch(t *testing.T) {
+	ts, client := newTestServer(t, http.StatusOK)
+
+	metrics := []models.Metrics{
+		gauge("Alloc", 1),
+		gauge("Sys", 2),
+		gauge("TotalAlloc", 1234567890),
+		counter("PollCount", 3),
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			ts, client := newTestServer(t, http.StatusOK)
+	err := client.SendBatch(t.Context(), metrics)
+	require.NoError(t, err)
 
-			err := client.Send(tt.metric)
-			require.NoError(t, err)
-
-			requests := ts.Requests()
-			require.Len(t, requests, 1)
-			assert.Equal(t, http.MethodPost, requests[0].method)
-			assert.Equal(t, "/update", requests[0].path)
-			assert.Equal(t, "application/json", requests[0].contentType)
-			assert.Equal(t, "gzip", requests[0].contentEncoding)
-			assert.JSONEq(t, tt.want, requests[0].body)
-		})
-	}
+	requests := ts.Requests()
+	require.Len(t, requests, 1)
+	assert.Equal(t, http.MethodPost, requests[0].method)
+	assert.Equal(t, "/updates/", requests[0].path)
+	assert.Equal(t, "application/json", requests[0].contentType)
+	assert.Equal(t, "gzip", requests[0].contentEncoding)
+	assert.JSONEq(t, `[
+		{"id":"Alloc","type":"gauge","value":1},
+		{"id":"Sys","type":"gauge","value":2},
+		{"id":"TotalAlloc","type":"gauge","value":1234567890},
+		{"id":"PollCount","type":"counter","delta":3}
+	]`, requests[0].body)
 }
 
-func TestSendServerError(t *testing.T) {
+func TestSendBatchEmpty(t *testing.T) {
+	ts, client := newTestServer(t, http.StatusOK)
+
+	require.NoError(t, client.SendBatch(t.Context(), nil))
+	require.NoError(t, client.SendBatch(t.Context(), []models.Metrics{}))
+	assert.Empty(t, ts.Requests())
+}
+
+func TestSendBatchServerError(t *testing.T) {
 	ts, client := newTestServer(t, http.StatusInternalServerError)
 
-	err := client.Send(gauge("Alloc", 1))
+	err := client.SendBatch(t.Context(), []models.Metrics{gauge("Alloc", 1)})
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "500")
 	assert.Len(t, ts.Requests(), 1)
 }
 
-func TestSendInvalidMetric(t *testing.T) {
-	tests := []struct {
-		name   string
-		metric models.Metrics
-	}{
-		{"gauge без значения", models.Metrics{ID: "Alloc", MType: models.Gauge}},
-		{"неизвестный тип", models.Metrics{ID: "Alloc", MType: "histogram"}},
-		{"gauge NaN", gauge("Alloc", math.NaN())},
-		{"gauge +Inf", gauge("Alloc", math.Inf(1))},
-	}
+func refuseDials(c *Client, n int32) *atomic.Int32 {
+	var (
+		dials  atomic.Int32
+		dialer net.Dialer
+	)
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			ts, client := newTestServer(t, http.StatusOK)
+	c.rest.SetTransport(&http.Transport{
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			if dials.Add(1) <= n {
+				return nil, &net.OpError{Op: "dial", Net: network, Err: syscall.ECONNREFUSED}
+			}
+			return dialer.DialContext(ctx, network, addr)
+		},
+	})
 
-			err := client.Send(tt.metric)
-
-			assert.Error(t, err)
-			assert.Empty(t, ts.Requests())
-		})
-	}
+	return &dials
 }
 
-func TestSendAll(t *testing.T) {
-	ts, client := newTestServer(t, http.StatusOK)
+func TestSendBatchGivesUpAfterRetries(t *testing.T) {
+	client := NewClient("127.0.0.1:1")
+	client.delays = []time.Duration{20 * time.Millisecond, 20 * time.Millisecond, 20 * time.Millisecond}
+	refuseDials(client, math.MaxInt32)
 
-	metrics := []models.Metrics{
-		gauge("Alloc", 1),
-		gauge("Sys", 2),
-		counter("PollCount", 3),
-	}
+	start := time.Now()
+	err := client.SendBatch(t.Context(), []models.Metrics{gauge("Alloc", 1)})
 
-	err := client.SendAll(metrics)
-	require.NoError(t, err)
-
-	requests := ts.Requests()
-	require.Len(t, requests, 3)
-	assert.JSONEq(t, `{"id":"Alloc","type":"gauge","value":1}`, requests[0].body)
-	assert.JSONEq(t, `{"id":"Sys","type":"gauge","value":2}`, requests[1].body)
-	assert.JSONEq(t, `{"id":"PollCount","type":"counter","delta":3}`, requests[2].body)
-}
-
-func TestSendAllStopsOnFirstError(t *testing.T) {
-	ts, client := newTestServer(t, http.StatusInternalServerError)
-
-	metrics := []models.Metrics{
-		gauge("Alloc", 1),
-		gauge("Sys", 2),
-		counter("PollCount", 3),
-	}
-
-	err := client.SendAll(metrics)
 	require.Error(t, err)
+	assert.True(t, isConnError(err))
+	assert.GreaterOrEqual(t, time.Since(start), 60*time.Millisecond)
+}
 
-	requests := ts.Requests()
-	require.Len(t, requests, 1)
-	assert.JSONEq(t, `{"id":"Alloc","type":"gauge","value":1}`, requests[0].body)
+func TestSendBatchRetriesUntilServerIsUp(t *testing.T) {
+	received := make(chan struct{}, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		received <- struct{}{}
+	}))
+	t.Cleanup(srv.Close)
+
+	client := NewClient(srv.Listener.Addr().String())
+	client.delays = []time.Duration{20 * time.Millisecond, 20 * time.Millisecond, 20 * time.Millisecond}
+	dials := refuseDials(client, 2)
+
+	err := client.SendBatch(t.Context(), []models.Metrics{gauge("Alloc", 1)})
+
+	require.NoError(t, err)
+	assert.Equal(t, int32(3), dials.Load(), "две неудачные попытки и одна успешная")
+	assert.Len(t, received, 1)
+}
+
+func TestSendBatchStopsRetryingOnCancel(t *testing.T) {
+	client := NewClient("127.0.0.1:1")
+	refuseDials(client, math.MaxInt32)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	err := client.SendBatch(ctx, []models.Metrics{gauge("Alloc", 1)})
+
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	assert.Less(t, time.Since(start), retry.Delays()[0])
 }
