@@ -49,6 +49,10 @@ func TestUpdateCounterOverflow(t *testing.T) {
 	assert.Equal(t, int64(math.MaxInt64), m.counters["PollCount"])
 }
 
+func TestPingIsNoop(t *testing.T) {
+	assert.NoError(t, NewMemStorage().PingContext(t.Context()))
+}
+
 func TestUpdateBatchConcurrent(t *testing.T) {
 	m := NewMemStorage()
 

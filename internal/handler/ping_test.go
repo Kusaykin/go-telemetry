@@ -32,7 +32,7 @@ func TestPing(t *testing.T) {
 	}{
 		{"БД доступна", fakePinger{}, http.MethodGet, http.StatusOK, ""},
 		{"БД недоступна", fakePinger{err: errors.New("connection refused")}, http.MethodGet, http.StatusInternalServerError, "db ping failed"},
-		{"БД не настроена", nil, http.MethodGet, http.StatusInternalServerError, "db ping: database is not configured"},
+		{"БД не настроена", nil, http.MethodGet, http.StatusOK, ""},
 		{"метод POST вместо GET", fakePinger{}, http.MethodPost, http.StatusMethodNotAllowed, ""},
 	}
 

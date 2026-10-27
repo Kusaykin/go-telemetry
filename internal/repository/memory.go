@@ -103,6 +103,10 @@ func (m *MemStorage) Counters(context.Context) (map[string]int64, error) {
 	return maps.Clone(m.counters), nil
 }
 
+func (m *MemStorage) PingContext(context.Context) error {
+	return nil
+}
+
 func (m *MemStorage) Snapshot() []models.Metrics {
 	m.mu.Lock()
 	defer m.mu.Unlock()

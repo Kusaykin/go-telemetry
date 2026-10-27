@@ -16,8 +16,7 @@ type Pinger interface {
 
 func (h *Handler) Ping(w http.ResponseWriter, r *http.Request) {
 	if h.db == nil {
-		h.log.Warn("db ping: database is not configured")
-		w.WriteHeader(http.StatusInternalServerError)
+		w.WriteHeader(http.StatusOK)
 		return
 	}
 

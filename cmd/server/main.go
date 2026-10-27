@@ -153,7 +153,7 @@ func openStorage(ctx context.Context, cfg config.Server, log *zap.Logger) (stora
 			return nil, nil, err
 		}
 
-		return store, nil, nil
+		return store, store, nil
 	}
 
 	db, err := repository.NewPostgres(cfg.DatabaseDSN)
