@@ -158,6 +158,7 @@ func TestUpdateBadRequest(t *testing.T) {
 		{"gauge -Inf", "/update/gauge/Alloc/-Inf"},
 		{"дробное значение counter", "/update/counter/PollCount/12.5"},
 		{"неизвестный тип метрики", "/update/histogram/Alloc/1"},
+		{"слишком длинное имя", "/update/gauge/" + strings.Repeat("a", models.MaxIDLength+1) + "/1"},
 	}
 
 	for _, tt := range tests {
@@ -199,6 +200,19 @@ func TestUpdateJSONCounter(t *testing.T) {
 	assert.Equal(t, int64(15), store.counters["PollCount"])
 }
 
+func TestUpdateMaxLengthName(t *testing.T) {
+	store := newFakeStorage()
+	name := strings.Repeat("a", models.MaxIDLength)
+
+	rec := do(store, http.MethodPost, "/update/gauge/"+name+"/1")
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	name = strings.Repeat("я", models.MaxIDLength)
+	rec = doBody(store, http.MethodPost, "/update", `{"id":"`+name+`","type":"counter","delta":1}`)
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, int64(1), store.counters[name])
+}
+
 func TestUpdateJSONErrors(t *testing.T) {
 	tests := []struct {
 		name string
@@ -213,6 +227,7 @@ func TestUpdateJSONErrors(t *testing.T) {
 		{"gauge без value", `{"id":"Alloc","type":"gauge","delta":1}`, http.StatusBadRequest},
 		{"counter без delta", `{"id":"PollCount","type":"counter","value":1}`, http.StatusBadRequest},
 		{"пустой id", `{"id":"","type":"gauge","value":1}`, http.StatusNotFound},
+		{"слишком длинный id", `{"id":"` + strings.Repeat("я", models.MaxIDLength+1) + `","type":"gauge","value":1}`, http.StatusBadRequest},
 	}
 
 	for _, tt := range tests {

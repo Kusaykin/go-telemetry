@@ -12,4 +12,4 @@
 
 | Версия | Что делает |
 |--------|------------|
-| `001_create_metrics` | таблицы `gauges` (`double precision`) и `counters` (`bigint`) |
+| `001_create_metrics` | таблицы `gauges` (`double precision`) и `counters` (`bigint`): суррогатный `id` (identity, PK), `name varchar(255) UNIQUE NOT NULL` |

@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/Kusaykin/go-telemetry/internal/handler"
+	models "github.com/Kusaykin/go-telemetry/internal/model"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -56,6 +57,7 @@ func TestUpdatesErrors(t *testing.T) {
 		{"gauge без значения", `[{"id":"Alloc","type":"gauge","value":1},{"id":"Sys","type":"gauge"}]`, http.StatusBadRequest},
 		{"неизвестный тип", `[{"id":"Alloc","type":"histogram","value":1}]`, http.StatusBadRequest},
 		{"пустой id", `[{"id":"Alloc","type":"gauge","value":1},{"id":"","type":"gauge","value":1}]`, http.StatusBadRequest},
+		{"слишком длинный id", `[{"id":"Alloc","type":"gauge","value":1},{"id":"` + strings.Repeat("a", models.MaxIDLength+1) + `","type":"gauge","value":1}]`, http.StatusBadRequest},
 		{"null-элемент", `[null]`, http.StatusBadRequest},
 		{"null после валидной метрики", `[{"id":"Alloc","type":"gauge","value":1}, null]`, http.StatusBadRequest},
 		{"мусор после массива", `[{"id":"Alloc","type":"gauge","value":1}] x`, http.StatusBadRequest},

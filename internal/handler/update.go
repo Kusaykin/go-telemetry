@@ -14,8 +14,8 @@ import (
 
 func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
-	if name == "" {
-		w.WriteHeader(http.StatusNotFound)
+	if err := models.ValidateID(name); err != nil {
+		w.WriteHeader(invalidMetricStatus(err))
 		return
 	}
 

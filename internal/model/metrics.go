@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"strconv"
+	"unicode/utf8"
 )
 
 const (
@@ -32,12 +33,29 @@ type Metrics struct {
 //easyjson:json
 type MetricsList []Metrics
 
-var ErrEmptyID = errors.New("metric id is empty")
+// MaxIDLength — максимальная длина имени метрики в символах, совпадает с varchar(255) в схеме БД.
+const MaxIDLength = 255
 
-// Validate проверяет, что у метрики есть имя, тип известен и для него задано значение.
-func (m Metrics) Validate() error {
-	if m.ID == "" {
+var (
+	ErrEmptyID   = errors.New("metric id is empty")
+	ErrIDTooLong = errors.New("metric id is too long")
+)
+
+func ValidateID(id string) error {
+	if id == "" {
 		return ErrEmptyID
+	}
+
+	if n := utf8.RuneCountInString(id); n > MaxIDLength {
+		return fmt.Errorf("%w: %d characters, max %d", ErrIDTooLong, n, MaxIDLength)
+	}
+
+	return nil
+}
+
+func (m Metrics) Validate() error {
+	if err := ValidateID(m.ID); err != nil {
+		return err
 	}
 
 	switch m.MType {

@@ -22,8 +22,12 @@
 
 `PostgresStorage` хранит метрики в двух таблицах:
 
-- `gauges(name text PRIMARY KEY, value double precision)`
-- `counters(name text PRIMARY KEY, delta bigint)`
+- `gauges(id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, name varchar(255) NOT NULL UNIQUE, value double precision)`
+- `counters(id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, name varchar(255) NOT NULL UNIQUE, delta bigint)`
+
+Колонка `name` хранит `Metrics.ID` (ключ `"id"` в JSON, имя метрики в URL); `id` — внутренний суррогатный ключ строки, наружу не отдаётся.
+
+Длина имени (`models.MaxIDLength`, 255 символов) проверяется и в приложении: слишком длинное имя даёт 400 при любом хранилище, а ограничение колонки — последняя защита.
 
 Сервер выбирает хранилище так: DSN задан — `PostgresStorage` (БД должна быть доступна при старте), иначе `FileStorage` (при пустом пути — только память).
 

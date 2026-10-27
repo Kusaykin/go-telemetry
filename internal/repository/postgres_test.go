@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"slices"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
@@ -225,6 +226,24 @@ func TestPostgresStorageGaugeAndCounterWithSameName(t *testing.T) {
 
 	delta, _ := mustCounter(t, s, "Same")
 	assert.Equal(t, int64(3), delta)
+}
+
+func TestPostgresStorageNameLength(t *testing.T) {
+	s := newPostgresStorage(t)
+
+	name := strings.Repeat("я", models.MaxIDLength)
+	mustUpdateGauge(t, s, name, 1.5)
+	mustUpdateCounter(t, s, name, 3)
+
+	value, ok := mustGauge(t, s, name)
+	assert.True(t, ok)
+	assert.Equal(t, 1.5, value)
+
+	err := s.UpdateGauge(t.Context(), name+"я", 1)
+
+	var pgErr *pgconn.PgError
+	require.ErrorAs(t, err, &pgErr)
+	assert.Equal(t, pgerrcode.StringDataRightTruncationDataException, pgErr.Code)
 }
 
 func TestPostgresStorageList(t *testing.T) {
