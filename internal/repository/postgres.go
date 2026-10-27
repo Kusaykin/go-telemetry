@@ -137,7 +137,9 @@ func newPostgresStorageWithPool(db *pgxpool.Pool) *PostgresStorage {
 func isRetriable(err error) bool {
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) {
-		return pgerrcode.IsConnectionException(pgErr.Code) || isServerUnavailable(pgErr.Code)
+		return pgerrcode.IsConnectionException(pgErr.Code) ||
+			isServerUnavailable(pgErr.Code) ||
+			isTransactionConflict(pgErr.Code)
 	}
 
 	var connErr *pgconn.ConnectError
@@ -179,9 +181,23 @@ func isServerUnavailable(code string) bool {
 	}
 }
 
+func isTransactionConflict(code string) bool {
+	switch code {
+	case pgerrcode.SerializationFailure, pgerrcode.DeadlockDetected:
+		return true
+	default:
+		return false
+	}
+}
+
 func isRetriableWrite(err error) bool {
 	var connErr *pgconn.ConnectError
-	return errors.As(err, &connErr) && isRetriable(err)
+	if errors.As(err, &connErr) {
+		return isRetriable(err)
+	}
+
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && isTransactionConflict(pgErr.Code)
 }
 
 var errCommit = errors.New("commit")

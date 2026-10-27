@@ -350,6 +350,25 @@ func TestIsRetriable(t *testing.T) {
 		}
 	})
 
+	t.Run("конфликт транзакций повторяется", func(t *testing.T) {
+		for _, code := range []string{
+			pgerrcode.SerializationFailure,
+			pgerrcode.DeadlockDetected,
+		} {
+			assert.True(t, isRetriable(pgErr(code)), code)
+		}
+	})
+
+	t.Run("прочие ошибки класса 40 не повторяются", func(t *testing.T) {
+		for _, code := range []string{
+			pgerrcode.TransactionRollback,
+			pgerrcode.TransactionIntegrityConstraintViolation,
+			pgerrcode.StatementCompletionUnknown,
+		} {
+			assert.False(t, isRetriable(pgErr(code)), code)
+		}
+	})
+
 	t.Run("обрыв соединения посреди запроса повторяется", func(t *testing.T) {
 		for _, err := range []error{
 			io.EOF,
@@ -388,6 +407,34 @@ func TestIsRetriable(t *testing.T) {
 		assert.False(t, isRetriable(errors.New("boom")))
 		assert.False(t, isRetriable(context.Canceled))
 	})
+}
+
+func TestIsRetriableWrite(t *testing.T) {
+	pgErr := func(code string) error {
+		return fmt.Errorf("wrapped: %w", &pgconn.PgError{Code: code})
+	}
+
+	t.Run("конфликт транзакций повторяется", func(t *testing.T) {
+		assert.True(t, isRetriableWrite(pgErr(pgerrcode.SerializationFailure)))
+		assert.True(t, isRetriableWrite(pgErr(pgerrcode.DeadlockDetected)))
+	})
+
+	t.Run("обрыв посреди запроса не повторяется", func(t *testing.T) {
+		assert.False(t, isRetriableWrite(pgErr(pgerrcode.ConnectionFailure)))
+		assert.False(t, isRetriableWrite(fmt.Errorf("wrapped: %w", io.ErrUnexpectedEOF)))
+	})
+
+	t.Run("неудачное подключение повторяется", func(t *testing.T) {
+		db := openPostgres(t, "postgres://127.0.0.1:1/metrics?sslmode=disable&connect_timeout=1")
+		assert.True(t, isRetriableWrite(db.Ping(t.Context())))
+	})
+}
+
+func TestIsRetriableTx(t *testing.T) {
+	conflict := &pgconn.PgError{Code: pgerrcode.SerializationFailure}
+
+	assert.True(t, isRetriableTx(fmt.Errorf("counter A: %w", conflict)))
+	assert.False(t, isRetriableTx(fmt.Errorf("%w: %w", errCommit, conflict)), "ошибка commit не повторяется")
 }
 
 func TestPostgresStorageRetriesConnectionErrors(t *testing.T) {
