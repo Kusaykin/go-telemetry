@@ -26,9 +26,9 @@ import (
 	"github.com/Kusaykin/go-telemetry/internal/retry"
 )
 
-func TestNewPostgres(t *testing.T) {
+func TestOpenPool(t *testing.T) {
 	t.Run("валидный DSN открывается без подключения к БД", func(t *testing.T) {
-		db, err := NewPostgres(t.Context(), "postgres://127.0.0.1:1/metrics?sslmode=disable")
+		db, err := openPool(t.Context(), "postgres://127.0.0.1:1/metrics?sslmode=disable")
 		require.NoError(t, err)
 		t.Cleanup(db.Close)
 
@@ -36,15 +36,25 @@ func TestNewPostgres(t *testing.T) {
 	})
 
 	t.Run("некорректный DSN отклоняется при открытии", func(t *testing.T) {
-		_, err := NewPostgres(t.Context(), "host=localhost port=abc")
+		_, err := openPool(t.Context(), "host=localhost port=abc")
 		assert.Error(t, err)
 	})
+}
+
+func TestNewPostgresStorageFailsWithoutDatabase(t *testing.T) {
+	_, err := NewPostgresStorage(t.Context(), "postgres://127.0.0.1:1/metrics?sslmode=disable&connect_timeout=1")
+	assert.ErrorContains(t, err, "connect postgres")
+}
+
+func TestNewPostgresStorageFailsOnInvalidDSN(t *testing.T) {
+	_, err := NewPostgresStorage(t.Context(), "host=localhost port=abc")
+	assert.ErrorContains(t, err, "open postgres")
 }
 
 func openPostgres(t *testing.T, dsn string) *pgxpool.Pool {
 	t.Helper()
 
-	db, err := NewPostgres(t.Context(), dsn)
+	db, err := openPool(t.Context(), dsn)
 	require.NoError(t, err)
 	t.Cleanup(db.Close)
 
@@ -53,7 +63,7 @@ func openPostgres(t *testing.T, dsn string) *pgxpool.Pool {
 
 func TestMigrateFailsWithoutDatabase(t *testing.T) {
 	db := openPostgres(t, "postgres://127.0.0.1:1/metrics?sslmode=disable&connect_timeout=1")
-	assert.Error(t, Migrate(t.Context(), db))
+	assert.Error(t, applyMigrations(t.Context(), db))
 }
 
 func TestMigrateFailsOnExpiredContext(t *testing.T) {
@@ -61,7 +71,7 @@ func TestMigrateFailsOnExpiredContext(t *testing.T) {
 	defer cancel()
 
 	db := openPostgres(t, "postgres://127.0.0.1:1/metrics?sslmode=disable")
-	assert.ErrorIs(t, Migrate(ctx, db), context.DeadlineExceeded)
+	assert.ErrorIs(t, applyMigrations(ctx, db), context.DeadlineExceeded)
 }
 
 func TestMigrateRespectsContextDeadline(t *testing.T) {
@@ -73,7 +83,7 @@ func TestMigrateRespectsContextDeadline(t *testing.T) {
 	db := openPostgres(t, "postgres://10.255.255.1:5432/metrics?sslmode=disable")
 
 	start := time.Now()
-	err := Migrate(ctx, db)
+	err := applyMigrations(ctx, db)
 
 	assert.Error(t, err)
 	assert.Less(t, time.Since(start), 3*time.Second)
@@ -110,7 +120,7 @@ func TestMigrateRespectsDeadlineWhileLockIsHeld(t *testing.T) {
 	defer cancel()
 
 	start := time.Now()
-	err = Migrate(ctx, db)
+	err = applyMigrations(ctx, db)
 
 	assert.Error(t, err)
 	assert.Less(t, time.Since(start), 3*time.Second)
@@ -137,7 +147,7 @@ func TestMigrateKeepsPoolAndSession(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 
-	require.NoError(t, Migrate(ctx, db))
+	require.NoError(t, applyMigrations(ctx, db))
 
 	var lockTimeout string
 	require.NoError(t, db.QueryRow(t.Context(), `SHOW lock_timeout`).Scan(&lockTimeout),
@@ -155,20 +165,21 @@ func newPostgresStorage(t *testing.T) *PostgresStorage {
 		t.Skip("TEST_DATABASE_DSN не задана")
 	}
 
-	db := openPostgres(t, dsn)
+	s, err := NewPostgresStorage(t.Context(), dsn)
+	require.NoError(t, err)
+	t.Cleanup(func() { s.Close() })
 
-	require.NoError(t, Migrate(t.Context(), db))
-	require.NoError(t, Migrate(t.Context(), db), "повторный запуск миграций не должен падать")
+	require.NoError(t, applyMigrations(t.Context(), s.db), "повторный запуск миграций не должен падать")
 
 	truncate := func() {
-		_, err := db.Exec(context.Background(), `TRUNCATE gauges, counters`)
+		_, err := s.db.Exec(context.Background(), `TRUNCATE gauges, counters`)
 		require.NoError(t, err)
 	}
 
 	truncate()
 	t.Cleanup(truncate)
 
-	return NewPostgresStorage(db)
+	return s
 }
 
 func TestPostgresStorageGauge(t *testing.T) {
@@ -381,7 +392,7 @@ func TestIsRetriable(t *testing.T) {
 
 func TestPostgresStorageRetriesConnectionErrors(t *testing.T) {
 	db := openPostgres(t, "postgres://127.0.0.1:1/metrics?sslmode=disable&connect_timeout=1")
-	s := NewPostgresStorage(db)
+	s := newPostgresStorageWithPool(db)
 	s.delays = []time.Duration{20 * time.Millisecond, 20 * time.Millisecond, 20 * time.Millisecond}
 
 	start := time.Now()
@@ -394,7 +405,7 @@ func TestPostgresStorageRetriesConnectionErrors(t *testing.T) {
 
 func TestPostgresStorageStopsRetryingOnCancel(t *testing.T) {
 	db := openPostgres(t, "postgres://127.0.0.1:1/metrics?sslmode=disable&connect_timeout=1")
-	s := NewPostgresStorage(db)
+	s := newPostgresStorageWithPool(db)
 
 	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
 	defer cancel()
@@ -408,7 +419,7 @@ func TestPostgresStorageStopsRetryingOnCancel(t *testing.T) {
 
 func TestPostgresStorageStopsRetryingOnShutdown(t *testing.T) {
 	db := openPostgres(t, "postgres://127.0.0.1:1/metrics?sslmode=disable&connect_timeout=1")
-	s := NewPostgresStorage(db)
+	s := newPostgresStorageWithPool(db)
 
 	runCtx, shutdown := context.WithCancel(t.Context())
 	done := make(chan error, 1)
@@ -427,7 +438,7 @@ func TestPostgresStorageStopsRetryingOnShutdown(t *testing.T) {
 
 func TestPostgresStoragePingDoesNotRetry(t *testing.T) {
 	db := openPostgres(t, "postgres://127.0.0.1:1/metrics?sslmode=disable&connect_timeout=1")
-	s := NewPostgresStorage(db)
+	s := newPostgresStorageWithPool(db)
 
 	start := time.Now()
 	err := s.PingContext(t.Context())

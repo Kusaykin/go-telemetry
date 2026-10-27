@@ -26,7 +26,7 @@ import (
 	"github.com/Kusaykin/go-telemetry/migrations"
 )
 
-func NewPostgres(ctx context.Context, dsn string) (*pgxpool.Pool, error) {
+func openPool(ctx context.Context, dsn string) (*pgxpool.Pool, error) {
 	pool, err := pgxpool.New(ctx, dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open postgres: %w", err)
@@ -35,7 +35,7 @@ func NewPostgres(ctx context.Context, dsn string) (*pgxpool.Pool, error) {
 	return pool, nil
 }
 
-func Migrate(ctx context.Context, pool *pgxpool.Pool) (err error) {
+func applyMigrations(ctx context.Context, pool *pgxpool.Pool) (err error) {
 	driverCfg := &migratepg.Config{}
 
 	deadline, hasDeadline := ctx.Deadline()
@@ -109,7 +109,26 @@ type PostgresStorage struct {
 	stop     context.CancelFunc
 }
 
-func NewPostgresStorage(db *pgxpool.Pool) *PostgresStorage {
+func NewPostgresStorage(ctx context.Context, dsn string) (*PostgresStorage, error) {
+	pool, err := openPool(ctx, dsn)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := pool.Ping(ctx); err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("connect postgres: %w", err)
+	}
+
+	if err := applyMigrations(ctx, pool); err != nil {
+		pool.Close()
+		return nil, err
+	}
+
+	return newPostgresStorageWithPool(pool), nil
+}
+
+func newPostgresStorageWithPool(db *pgxpool.Pool) *PostgresStorage {
 	stopping, stop := context.WithCancel(context.Background())
 
 	return &PostgresStorage{db: db, delays: retry.Delays(), stopping: stopping, stop: stop}
