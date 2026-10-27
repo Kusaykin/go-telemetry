@@ -134,7 +134,7 @@ func newPostgresStorageWithPool(db *pgxpool.Pool) *PostgresStorage {
 	return &PostgresStorage{db: db, delays: retry.Delays(), stopping: stopping, stop: stop}
 }
 
-func IsRetriable(err error) bool {
+func isRetriable(err error) bool {
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) {
 		return pgerrcode.IsConnectionException(pgErr.Code) || isServerUnavailable(pgErr.Code)
@@ -181,17 +181,17 @@ func isServerUnavailable(code string) bool {
 
 func isRetriableWrite(err error) bool {
 	var connErr *pgconn.ConnectError
-	return errors.As(err, &connErr) && IsRetriable(err)
+	return errors.As(err, &connErr) && isRetriable(err)
 }
 
 var errCommit = errors.New("commit")
 
 func isRetriableTx(err error) bool {
-	return IsRetriable(err) && !errors.Is(err, errCommit)
+	return isRetriable(err) && !errors.Is(err, errCommit)
 }
 
 func (s *PostgresStorage) retry(ctx context.Context, fn func(ctx context.Context) error) error {
-	return s.retryIf(ctx, IsRetriable, fn)
+	return s.retryIf(ctx, isRetriable, fn)
 }
 
 func (s *PostgresStorage) retryIf(ctx context.Context, retriable func(error) bool, fn func(ctx context.Context) error) error {

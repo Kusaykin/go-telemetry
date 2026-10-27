@@ -336,7 +336,7 @@ func TestIsRetriable(t *testing.T) {
 			pgerrcode.ConnectionFailure,
 			pgerrcode.SQLClientUnableToEstablishSQLConnection,
 		} {
-			assert.True(t, IsRetriable(pgErr(code)), code)
+			assert.True(t, isRetriable(pgErr(code)), code)
 		}
 	})
 
@@ -346,7 +346,7 @@ func TestIsRetriable(t *testing.T) {
 			pgerrcode.CrashShutdown,
 			pgerrcode.CannotConnectNow,
 		} {
-			assert.True(t, IsRetriable(pgErr(code)), code)
+			assert.True(t, isRetriable(pgErr(code)), code)
 		}
 	})
 
@@ -356,7 +356,7 @@ func TestIsRetriable(t *testing.T) {
 			io.ErrUnexpectedEOF,
 			&net.OpError{Op: "read", Net: "tcp", Err: syscall.ECONNRESET},
 		} {
-			assert.True(t, IsRetriable(fmt.Errorf("wrapped: %w", err)), err.Error())
+			assert.True(t, isRetriable(fmt.Errorf("wrapped: %w", err)), err.Error())
 		}
 	})
 
@@ -366,13 +366,13 @@ func TestIsRetriable(t *testing.T) {
 			pgerrcode.NumericValueOutOfRange,
 			pgerrcode.UndefinedTable,
 		} {
-			assert.False(t, IsRetriable(pgErr(code)), code)
+			assert.False(t, isRetriable(pgErr(code)), code)
 		}
 	})
 
 	t.Run("неудачное подключение повторяется", func(t *testing.T) {
 		db := openPostgres(t, "postgres://127.0.0.1:1/metrics?sslmode=disable&connect_timeout=1")
-		assert.True(t, IsRetriable(db.Ping(t.Context())))
+		assert.True(t, isRetriable(db.Ping(t.Context())))
 	})
 
 	t.Run("несуществующий хост не повторяется", func(t *testing.T) {
@@ -381,12 +381,12 @@ func TestIsRetriable(t *testing.T) {
 
 		var dnsErr *net.DNSError
 		require.ErrorAs(t, err, &dnsErr)
-		assert.False(t, IsRetriable(err))
+		assert.False(t, isRetriable(err))
 	})
 
 	t.Run("прочие ошибки не повторяются", func(t *testing.T) {
-		assert.False(t, IsRetriable(errors.New("boom")))
-		assert.False(t, IsRetriable(context.Canceled))
+		assert.False(t, isRetriable(errors.New("boom")))
+		assert.False(t, isRetriable(context.Canceled))
 	})
 }
 
@@ -399,7 +399,7 @@ func TestPostgresStorageRetriesConnectionErrors(t *testing.T) {
 	err := s.UpdateGauge(t.Context(), "Alloc", 1)
 
 	require.Error(t, err)
-	assert.True(t, IsRetriable(err))
+	assert.True(t, isRetriable(err))
 	assert.GreaterOrEqual(t, time.Since(start), 60*time.Millisecond)
 }
 
@@ -431,7 +431,7 @@ func TestPostgresStorageStopsRetryingOnShutdown(t *testing.T) {
 	err := s.UpdateGauge(t.Context(), "Alloc", 1)
 
 	require.ErrorIs(t, err, context.Canceled)
-	assert.True(t, IsRetriable(err), "возвращается исходная ошибка подключения")
+	assert.True(t, isRetriable(err), "возвращается исходная ошибка подключения")
 	assert.Less(t, time.Since(start), retry.Delays()[0])
 	require.NoError(t, <-done)
 }
