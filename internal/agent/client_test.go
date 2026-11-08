@@ -17,6 +17,7 @@ import (
 
 	models "github.com/Kusaykin/go-telemetry/internal/model"
 	"github.com/Kusaykin/go-telemetry/internal/retry"
+	"github.com/Kusaykin/go-telemetry/internal/sign"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -26,6 +27,7 @@ type request struct {
 	path            string
 	contentType     string
 	contentEncoding string
+	hash            string
 	body            string
 }
 
@@ -36,6 +38,10 @@ type testServer struct {
 }
 
 func newTestServer(t *testing.T, status int) (*testServer, *Client) {
+	return newSignedTestServer(t, status, "")
+}
+
+func newSignedTestServer(t *testing.T, status int, key string) (*testServer, *Client) {
 	ts := &testServer{status: status}
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -59,6 +65,7 @@ func newTestServer(t *testing.T, status int) (*testServer, *Client) {
 			path:            r.URL.Path,
 			contentType:     r.Header.Get("Content-Type"),
 			contentEncoding: r.Header.Get("Content-Encoding"),
+			hash:            r.Header.Get(sign.Header),
 			body:            string(body),
 		})
 		status := ts.status
@@ -70,7 +77,7 @@ func newTestServer(t *testing.T, status int) (*testServer, *Client) {
 	}))
 	t.Cleanup(srv.Close)
 
-	return ts, NewClient(srv.Listener.Addr().String())
+	return ts, NewClient(srv.Listener.Addr().String(), key)
 }
 
 // Requests возвращает копию полученных сервером запросов.
@@ -123,6 +130,29 @@ func TestSendBatch(t *testing.T) {
 	]`, requests[0].body)
 }
 
+func TestSendBatchSignsUncompressedBody(t *testing.T) {
+	const key = "secret"
+	ts, client := newSignedTestServer(t, http.StatusOK, key)
+
+	require.NoError(t, client.SendBatch(t.Context(), []models.Metrics{counter("PollCount", 3)}))
+
+	requests := ts.Requests()
+	require.Len(t, requests, 1)
+	require.NotEmpty(t, requests[0].hash)
+	assert.True(t, sign.Verify([]byte(requests[0].body), []byte(key), requests[0].hash),
+		"подпись должна совпадать с HMAC-SHA256 от распакованного тела")
+}
+
+func TestSendBatchWithoutKeyHasNoHash(t *testing.T) {
+	ts, client := newTestServer(t, http.StatusOK)
+
+	require.NoError(t, client.SendBatch(t.Context(), []models.Metrics{counter("PollCount", 3)}))
+
+	requests := ts.Requests()
+	require.Len(t, requests, 1)
+	assert.Empty(t, requests[0].hash)
+}
+
 func TestSendBatchEmpty(t *testing.T) {
 	ts, client := newTestServer(t, http.StatusOK)
 
@@ -160,7 +190,7 @@ func refuseDials(c *Client, n int32) *atomic.Int32 {
 }
 
 func TestSendBatchGivesUpAfterRetries(t *testing.T) {
-	client := NewClient("127.0.0.1:1")
+	client := NewClient("127.0.0.1:1", "")
 	client.delays = []time.Duration{20 * time.Millisecond, 20 * time.Millisecond, 20 * time.Millisecond}
 	refuseDials(client, math.MaxInt32)
 
@@ -179,7 +209,7 @@ func TestSendBatchRetriesUntilServerIsUp(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	client := NewClient(srv.Listener.Addr().String())
+	client := NewClient(srv.Listener.Addr().String(), "")
 	client.delays = []time.Duration{20 * time.Millisecond, 20 * time.Millisecond, 20 * time.Millisecond}
 	dials := refuseDials(client, 2)
 
@@ -191,7 +221,7 @@ func TestSendBatchRetriesUntilServerIsUp(t *testing.T) {
 }
 
 func TestSendBatchStopsRetryingOnCancel(t *testing.T) {
-	client := NewClient("127.0.0.1:1")
+	client := NewClient("127.0.0.1:1", "")
 	refuseDials(client, math.MaxInt32)
 
 	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)

@@ -196,6 +196,29 @@ func TestLoadServerDatabaseDSN(t *testing.T) {
 	}
 }
 
+func TestLoadServerKey(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		env  map[string]string
+		want string
+	}{
+		{"флаг", []string{"-k=flag-key"}, nil, "flag-key"},
+		{"только env", nil, map[string]string{"KEY": "env-key"}, "env-key"},
+		{"env приоритетнее флага", []string{"-k=flag-key"}, map[string]string{"KEY": "env-key"}, "env-key"},
+		{"по умолчанию пусто", nil, map[string]string{}, ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := LoadServer(tt.args, envMap(tt.env), io.Discard)
+
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, cfg.Key)
+		})
+	}
+}
+
 func TestLoadServerStorageErrors(t *testing.T) {
 	tests := []struct {
 		name string

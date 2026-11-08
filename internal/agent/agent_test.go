@@ -120,7 +120,7 @@ func TestPollCountAccumulatesToPollsOnServer(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	a := New(config.DefaultAgent(), zap.NewNop())
-	a.client = NewClient(srv.Listener.Addr().String())
+	a.client = NewClient(srv.Listener.Addr().String(), "")
 
 	const polls = 20
 	for range polls {
@@ -228,7 +228,7 @@ func TestAgentKeepsPollingWhileReportRetries(t *testing.T) {
 
 	core, logs := observer.New(zapcore.InfoLevel)
 	a := New(cfg, zap.New(core))
-	a.client = NewClient("127.0.0.1:1")
+	a.client = NewClient("127.0.0.1:1", "")
 	a.client.delays = []time.Duration{time.Hour}
 	refuseDials(a.client, math.MaxInt32)
 	a.flushTimeout = 50 * time.Millisecond

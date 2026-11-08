@@ -26,7 +26,7 @@ func New(cfg config.Agent, log *zap.Logger) *Agent {
 	return &Agent{
 		cfg:       cfg,
 		collector: NewCollector(),
-		client:    NewClient(cfg.Address),
+		client:    NewClient(cfg.Address, cfg.Key),
 		log:       log,
 
 		flushTimeout: flushTimeout,
@@ -38,6 +38,7 @@ func (a *Agent) Run(ctx context.Context) {
 		zap.String("address", a.cfg.Address),
 		zap.Duration("poll_interval", a.cfg.PollInterval),
 		zap.Duration("report_interval", a.cfg.ReportInterval),
+		zap.Bool("signing", a.cfg.Key != ""),
 	)
 
 	ticker := time.NewTicker(a.cfg.PollInterval)

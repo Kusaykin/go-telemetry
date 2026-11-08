@@ -17,6 +17,8 @@ const (
 	envAddress        = "ADDRESS"
 	envReportInterval = "REPORT_INTERVAL"
 	envPollInterval   = "POLL_INTERVAL"
+	envKey            = "KEY"
+	keyUsage          = "`ключ` для подписи данных HMAC-SHA256 (пусто — без подписи)"
 )
 
 type LookupEnv func(key string) (string, bool)

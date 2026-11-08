@@ -14,6 +14,7 @@ type Agent struct {
 	Address        string
 	PollInterval   time.Duration
 	ReportInterval time.Duration
+	Key            string
 }
 
 func DefaultAgent() Agent {
@@ -31,6 +32,7 @@ func LoadAgent(args []string, lookup LookupEnv, errOut io.Writer) (Agent, error)
 	fs.stringVar(&cfg.Address, "a", envAddress, addressUsage)
 	fs.secondsVar(&cfg.ReportInterval, "r", envReportInterval, "частота отправки метрик на сервер, `секунды`")
 	fs.secondsVar(&cfg.PollInterval, "p", envPollInterval, "частота опроса метрик из runtime, `секунды`")
+	fs.stringVar(&cfg.Key, "k", envKey, keyUsage)
 
 	if err := fs.parse(args, lookup); err != nil {
 		return Agent{}, err

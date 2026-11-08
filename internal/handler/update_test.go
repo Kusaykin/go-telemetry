@@ -96,7 +96,7 @@ func doBody(store handler.Storage, method, path, body string) *httptest.Response
 		req.Header.Set("Content-Type", "application/json")
 	}
 	rec := httptest.NewRecorder()
-	handler.NewRouter(store, nil, zap.NewNop()).ServeHTTP(rec, req)
+	handler.NewRouter(store, nil, zap.NewNop(), "").ServeHTTP(rec, req)
 
 	return rec
 }

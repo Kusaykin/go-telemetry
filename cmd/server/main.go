@@ -172,6 +172,7 @@ func logStartup(cfg config.Server, log *zap.Logger) {
 	fields := []zap.Field{
 		zap.String("address", cfg.Address),
 		zap.String("storage", string(kind)),
+		zap.Bool("signing", cfg.Key != ""),
 	}
 
 	fileFields := []zap.Field{
@@ -201,6 +202,6 @@ func fileSettingsChanged(cfg config.Server) bool {
 func newServer(cfg config.Server, store handler.Storage, db handler.Pinger, log *zap.Logger) *http.Server {
 	return &http.Server{
 		Addr:    cfg.Address,
-		Handler: handler.NewRouter(store, db, log),
+		Handler: handler.NewRouter(store, db, log, cfg.Key),
 	}
 }

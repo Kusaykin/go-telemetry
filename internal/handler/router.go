@@ -8,13 +8,16 @@ import (
 	"go.uber.org/zap"
 )
 
-func NewRouter(s Storage, db Pinger, log *zap.Logger) http.Handler {
+func NewRouter(s Storage, db Pinger, log *zap.Logger, key string) http.Handler {
 	h := New(s, db, log)
 
 	r := chi.NewRouter()
 
 	r.Use(middleware.Logging(log))
 	r.Use(middleware.Gzip)
+	if key != "" {
+		r.Use(middleware.Hash([]byte(key)))
+	}
 
 	r.Get("/", h.Index)
 	r.Get("/ping", h.Ping)

@@ -22,6 +22,7 @@ type Server struct {
 	FileStoragePath string
 	Restore         bool
 	DatabaseDSN     string
+	Key             string
 }
 
 func DefaultServer() Server {
@@ -45,6 +46,7 @@ func LoadServer(args []string, lookup LookupEnv, errOut io.Writer) (Server, erro
 	fs.boolVar(&cfg.Restore, "r", envRestore, "загружать сохранённые метрики из файла при старте")
 	fs.stringVar(&cfg.DatabaseDSN, "d", envDatabaseDSN,
 		"`строка` подключения к PostgreSQL для хранения метрик (пусто — файл или память)")
+	fs.stringVar(&cfg.Key, "k", envKey, keyUsage)
 
 	if err := fs.parse(args, lookup); err != nil {
 		return Server{}, err
