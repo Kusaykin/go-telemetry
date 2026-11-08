@@ -3,6 +3,7 @@ package agent
 import (
 	"math/rand"
 	"runtime"
+	"sync"
 
 	models "github.com/Kusaykin/go-telemetry/internal/model"
 )
@@ -14,6 +15,7 @@ const (
 )
 
 type Collector struct {
+	mu        sync.Mutex
 	gauges    map[string]float64
 	pollCount int64
 }
@@ -26,8 +28,7 @@ func (c *Collector) Poll() {
 	var m runtime.MemStats
 	runtime.ReadMemStats(&m)
 
-	c.pollCount++
-	c.gauges = map[string]float64{
+	gauges := map[string]float64{
 		"Alloc":         float64(m.Alloc),
 		"BuckHashSys":   float64(m.BuckHashSys),
 		"Frees":         float64(m.Frees),
@@ -58,9 +59,18 @@ func (c *Collector) Poll() {
 
 		RandomValueName: rand.Float64(),
 	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.pollCount++
+	c.gauges = gauges
 }
 
 func (c *Collector) Snapshot() []models.Metrics {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	snapshot := make([]models.Metrics, 0, len(c.gauges)+1)
 
 	for name, value := range c.gauges {
@@ -82,9 +92,15 @@ func (c *Collector) Snapshot() []models.Metrics {
 }
 
 func (c *Collector) PollCountDelta() int64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	return c.pollCount
 }
 
 func (c *Collector) AckPollCount(delta int64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	c.pollCount -= delta
 }

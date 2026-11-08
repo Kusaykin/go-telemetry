@@ -11,32 +11,54 @@ import (
 	models "github.com/Kusaykin/go-telemetry/internal/model"
 )
 
-const maxBodySize = 4 << 10
+const (
+	maxBodySize      = 4 << 10
+	maxBatchBodySize = 1 << 20
+)
 
 var errNullBody = errors.New("body is null")
 
 func decodeMetric(w http.ResponseWriter, r *http.Request) (models.Metrics, error) {
 	var m models.Metrics
 
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBodySize))
-	if err != nil {
-		return m, err
-	}
-
-	if bytes.Equal(bytes.TrimSpace(body), []byte("null")) {
-		return m, errNullBody
-	}
-
-	err = easyjson.Unmarshal(body, &m)
+	err := decodeBody(w, r, maxBodySize, &m)
 
 	return m, err
 }
 
-// decodeStatus возвращает код ответа для ошибки decodeMetric.
+func decodeMetrics(w http.ResponseWriter, r *http.Request) (models.MetricsList, error) {
+	var batch models.MetricsList
+
+	err := decodeBody(w, r, maxBatchBodySize, &batch)
+
+	return batch, err
+}
+
+func decodeBody(w http.ResponseWriter, r *http.Request, limit int64, v easyjson.Unmarshaler) error {
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, limit))
+	if err != nil {
+		return err
+	}
+
+	if bytes.Equal(bytes.TrimSpace(body), []byte("null")) {
+		return errNullBody
+	}
+
+	return easyjson.Unmarshal(body, v)
+}
+
 func decodeStatus(err error) int {
 	var maxBytesErr *http.MaxBytesError
 	if errors.As(err, &maxBytesErr) {
 		return http.StatusRequestEntityTooLarge
+	}
+
+	return http.StatusBadRequest
+}
+
+func invalidMetricStatus(err error) int {
+	if errors.Is(err, models.ErrEmptyID) {
+		return http.StatusNotFound
 	}
 
 	return http.StatusBadRequest

@@ -1,9 +1,11 @@
 package models
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"strconv"
+	"unicode/utf8"
 )
 
 const (
@@ -17,7 +19,7 @@ const (
 // что бы отличать значение "0", от не заданного значения
 // и соответственно не кодировать в структуру.
 //
-//go:generate go run github.com/mailru/easyjson/easyjson metrics.go
+//go:generate go run github.com/mailru/easyjson/easyjson -output_filename metrics_easyjson.gen.go metrics.go
 //easyjson:json
 type Metrics struct {
 	ID    string   `json:"id"`
@@ -26,8 +28,36 @@ type Metrics struct {
 	Value *float64 `json:"value,omitempty"`
 }
 
-// Validate проверяет, что тип метрики известен и для него задано значение.
+// MetricsList — батч метрик для POST /updates/.
+//
+//easyjson:json
+type MetricsList []Metrics
+
+// MaxIDLength — максимальная длина имени метрики в символах, совпадает с varchar(255) в схеме БД.
+const MaxIDLength = 255
+
+var (
+	ErrEmptyID   = errors.New("metric id is empty")
+	ErrIDTooLong = errors.New("metric id is too long")
+)
+
+func ValidateID(id string) error {
+	if id == "" {
+		return ErrEmptyID
+	}
+
+	if n := utf8.RuneCountInString(id); n > MaxIDLength {
+		return fmt.Errorf("%w: %d characters, max %d", ErrIDTooLong, n, MaxIDLength)
+	}
+
+	return nil
+}
+
 func (m Metrics) Validate() error {
+	if err := ValidateID(m.ID); err != nil {
+		return err
+	}
+
 	switch m.MType {
 	case Gauge:
 		if m.Value == nil {
@@ -47,8 +77,6 @@ func (m Metrics) Validate() error {
 	return nil
 }
 
-// ValueString возвращает значение метрики в текстовом виде — в том формате,
-// в котором оно передаётся в URL и отдаётся сервером.
 func (m Metrics) ValueString() (string, error) {
 	if err := m.Validate(); err != nil {
 		return "", err
@@ -61,11 +89,69 @@ func (m Metrics) ValueString() (string, error) {
 	return FormatCounter(*m.Delta), nil
 }
 
-// FormatGauge и FormatCounter — единый формат значений для агента и сервера.
 func FormatGauge(value float64) string {
 	return strconv.FormatFloat(value, 'f', -1, 64)
 }
 
 func FormatCounter(delta int64) string {
 	return strconv.FormatInt(delta, 10)
+}
+
+var ErrCounterOverflow = errors.New("counter overflow")
+
+func AddDelta(value, delta int64) (int64, error) {
+	sum := value + delta
+	if (delta > 0 && sum < value) || (delta < 0 && sum > value) {
+		return 0, fmt.Errorf("%w: %d + %d", ErrCounterOverflow, value, delta)
+	}
+
+	return sum, nil
+}
+
+type InvalidMetricError struct {
+	Index  int
+	Metric Metrics
+	Err    error
+}
+
+func (e *InvalidMetricError) Error() string {
+	return fmt.Sprintf("metric %d: %v", e.Index, e.Err)
+}
+
+func (e *InvalidMetricError) Unwrap() error {
+	return e.Err
+}
+
+func ValidateBatch(metrics []Metrics) error {
+	for i, m := range metrics {
+		if err := m.Validate(); err != nil {
+			return &InvalidMetricError{Index: i, Metric: m, Err: err}
+		}
+	}
+
+	return nil
+}
+
+func Collapse(metrics []Metrics) (map[string]float64, map[string]int64, error) {
+	if err := ValidateBatch(metrics); err != nil {
+		return nil, nil, err
+	}
+
+	gauges := make(map[string]float64)
+	counters := make(map[string]int64)
+
+	for _, m := range metrics {
+		switch m.MType {
+		case Gauge:
+			gauges[m.ID] = *m.Value
+		case Counter:
+			sum, err := AddDelta(counters[m.ID], *m.Delta)
+			if err != nil {
+				return nil, nil, fmt.Errorf("counter %s: %w", m.ID, err)
+			}
+			counters[m.ID] = sum
+		}
+	}
+
+	return gauges, counters, nil
 }

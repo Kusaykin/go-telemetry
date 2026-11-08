@@ -1,6 +1,7 @@
 package handler_test
 
 import (
+	"context"
 	"maps"
 	"net/http"
 	"net/http/httptest"
@@ -8,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/Kusaykin/go-telemetry/internal/handler"
+	models "github.com/Kusaykin/go-telemetry/internal/model"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -16,6 +18,7 @@ import (
 type fakeStorage struct {
 	gauges   map[string]float64
 	counters map[string]int64
+	err      error // если задана, её возвращает любой метод
 }
 
 func newFakeStorage() *fakeStorage {
@@ -25,34 +28,62 @@ func newFakeStorage() *fakeStorage {
 	}
 }
 
-func (f *fakeStorage) UpdateGauge(name string, value float64) {
+func (f *fakeStorage) UpdateGauge(_ context.Context, name string, value float64) error {
+	if f.err != nil {
+		return f.err
+	}
+
 	f.gauges[name] = value
+
+	return nil
 }
 
-func (f *fakeStorage) UpdateCounter(name string, delta int64) int64 {
+func (f *fakeStorage) UpdateCounter(_ context.Context, name string, delta int64) (int64, error) {
+	if f.err != nil {
+		return 0, f.err
+	}
+
 	f.counters[name] += delta
 
-	return f.counters[name]
+	return f.counters[name], nil
 }
 
-func (f *fakeStorage) Gauge(name string) (float64, bool) {
+func (f *fakeStorage) UpdateBatch(_ context.Context, metrics []models.Metrics) error {
+	if f.err != nil {
+		return f.err
+	}
+
+	gauges, counters, err := models.Collapse(metrics)
+	if err != nil {
+		return err
+	}
+
+	maps.Copy(f.gauges, gauges)
+	for name, delta := range counters {
+		f.counters[name] += delta
+	}
+
+	return nil
+}
+
+func (f *fakeStorage) Gauge(_ context.Context, name string) (float64, bool, error) {
 	value, ok := f.gauges[name]
 
-	return value, ok
+	return value, ok, f.err
 }
 
-func (f *fakeStorage) Counter(name string) (int64, bool) {
+func (f *fakeStorage) Counter(_ context.Context, name string) (int64, bool, error) {
 	delta, ok := f.counters[name]
 
-	return delta, ok
+	return delta, ok, f.err
 }
 
-func (f *fakeStorage) Gauges() map[string]float64 {
-	return maps.Clone(f.gauges)
+func (f *fakeStorage) Gauges(context.Context) (map[string]float64, error) {
+	return maps.Clone(f.gauges), f.err
 }
 
-func (f *fakeStorage) Counters() map[string]int64 {
-	return maps.Clone(f.counters)
+func (f *fakeStorage) Counters(context.Context) (map[string]int64, error) {
+	return maps.Clone(f.counters), f.err
 }
 
 func do(store handler.Storage, method, path string) *httptest.ResponseRecorder {
@@ -65,7 +96,7 @@ func doBody(store handler.Storage, method, path, body string) *httptest.Response
 		req.Header.Set("Content-Type", "application/json")
 	}
 	rec := httptest.NewRecorder()
-	handler.NewRouter(store, zap.NewNop()).ServeHTTP(rec, req)
+	handler.NewRouter(store, nil, zap.NewNop()).ServeHTTP(rec, req)
 
 	return rec
 }
@@ -127,6 +158,7 @@ func TestUpdateBadRequest(t *testing.T) {
 		{"gauge -Inf", "/update/gauge/Alloc/-Inf"},
 		{"дробное значение counter", "/update/counter/PollCount/12.5"},
 		{"неизвестный тип метрики", "/update/histogram/Alloc/1"},
+		{"слишком длинное имя", "/update/gauge/" + strings.Repeat("a", models.MaxIDLength+1) + "/1"},
 	}
 
 	for _, tt := range tests {
@@ -168,6 +200,19 @@ func TestUpdateJSONCounter(t *testing.T) {
 	assert.Equal(t, int64(15), store.counters["PollCount"])
 }
 
+func TestUpdateMaxLengthName(t *testing.T) {
+	store := newFakeStorage()
+	name := strings.Repeat("a", models.MaxIDLength)
+
+	rec := do(store, http.MethodPost, "/update/gauge/"+name+"/1")
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	name = strings.Repeat("я", models.MaxIDLength)
+	rec = doBody(store, http.MethodPost, "/update", `{"id":"`+name+`","type":"counter","delta":1}`)
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, int64(1), store.counters[name])
+}
+
 func TestUpdateJSONErrors(t *testing.T) {
 	tests := []struct {
 		name string
@@ -182,6 +227,7 @@ func TestUpdateJSONErrors(t *testing.T) {
 		{"gauge без value", `{"id":"Alloc","type":"gauge","delta":1}`, http.StatusBadRequest},
 		{"counter без delta", `{"id":"PollCount","type":"counter","value":1}`, http.StatusBadRequest},
 		{"пустой id", `{"id":"","type":"gauge","value":1}`, http.StatusNotFound},
+		{"слишком длинный id", `{"id":"` + strings.Repeat("я", models.MaxIDLength+1) + `","type":"gauge","value":1}`, http.StatusBadRequest},
 	}
 
 	for _, tt := range tests {

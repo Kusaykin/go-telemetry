@@ -110,7 +110,7 @@ func TestLoadServerHelpListsEnv(t *testing.T) {
 	assert.Contains(t, out.String(), "ADDRESS")
 	assert.NotContains(t, out.String(), "REPORT_INTERVAL")
 
-	for _, want := range []string{"-i секунды", "-f путь", "-r\t", "STORE_INTERVAL", "FILE_STORAGE_PATH", "RESTORE"} {
+	for _, want := range []string{"-i секунды", "-f путь", "-r\t", "-d строка", "STORE_INTERVAL", "FILE_STORAGE_PATH", "RESTORE", "DATABASE_DSN"} {
 		assert.Contains(t, out.String(), want)
 	}
 }
@@ -167,6 +167,31 @@ func TestLoadServerStorageFlags(t *testing.T) {
 
 			require.NoError(t, err)
 			assert.Equal(t, tt.want, cfg)
+		})
+	}
+}
+
+func TestLoadServerDatabaseDSN(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		env  map[string]string
+		want string
+	}{
+		{"флаг", []string{"-d=postgres://flag/db"}, nil, "postgres://flag/db"},
+		{"флаг через пробел", []string{"-d", "postgres://flag/db"}, nil, "postgres://flag/db"},
+		{"только env", nil, map[string]string{"DATABASE_DSN": "postgres://env/db"}, "postgres://env/db"},
+		{"env приоритетнее флага", []string{"-d=postgres://flag/db"}, map[string]string{"DATABASE_DSN": "postgres://env/db"}, "postgres://env/db"},
+		{"пустой env игнорируется", []string{"-d=postgres://flag/db"}, map[string]string{"DATABASE_DSN": ""}, "postgres://flag/db"},
+		{"по умолчанию пусто", nil, map[string]string{}, ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := LoadServer(tt.args, envMap(tt.env), io.Discard)
+
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, cfg.DatabaseDSN)
 		})
 	}
 }

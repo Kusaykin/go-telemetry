@@ -11,6 +11,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
+
+	models "github.com/Kusaykin/go-telemetry/internal/model"
 )
 
 const (
@@ -37,35 +39,35 @@ func TestFileStorageRoundTrip(t *testing.T) {
 	path := tempPath(t)
 
 	s := newFileStorage(t, path, periodicInterval, false)
-	s.UpdateGauge("Alloc", 12.5)
-	s.UpdateGauge("Zero", 0)
-	s.UpdateCounter("PollCount", 42)
-	s.UpdateCounter("ZeroCount", 0)
+	mustUpdateGauge(t, s, "Alloc", 12.5)
+	mustUpdateGauge(t, s, "Zero", 0)
+	mustUpdateCounter(t, s, "PollCount", 42)
+	mustUpdateCounter(t, s, "ZeroCount", 0)
 	require.NoError(t, s.Save())
 
 	restored := newFileStorage(t, path, periodicInterval, true)
 
-	assert.Equal(t, map[string]float64{"Alloc": 12.5, "Zero": 0}, restored.Gauges())
-	assert.Equal(t, map[string]int64{"PollCount": 42, "ZeroCount": 0}, restored.Counters())
+	assert.Equal(t, map[string]float64{"Alloc": 12.5, "Zero": 0}, mustGauges(t, restored))
+	assert.Equal(t, map[string]int64{"PollCount": 42, "ZeroCount": 0}, mustCounters(t, restored))
 }
 
 func TestFileStorageReads(t *testing.T) {
 	s := newFileStorage(t, tempPath(t), periodicInterval, false)
-	s.UpdateGauge("Alloc", 1.5)
-	assert.Equal(t, int64(3), s.UpdateCounter("PollCount", 3))
+	mustUpdateGauge(t, s, "Alloc", 1.5)
+	assert.Equal(t, int64(3), mustUpdateCounter(t, s, "PollCount", 3))
 
-	value, ok := s.Gauge("Alloc")
+	value, ok := mustGauge(t, s, "Alloc")
 	assert.True(t, ok)
 	assert.Equal(t, 1.5, value)
 
-	delta, ok := s.Counter("PollCount")
+	delta, ok := mustCounter(t, s, "PollCount")
 	assert.True(t, ok)
 	assert.Equal(t, int64(3), delta)
 
-	_, ok = s.Gauge("Missing")
+	_, ok = mustGauge(t, s, "Missing")
 	assert.False(t, ok)
 
-	_, ok = s.Counter("Missing")
+	_, ok = mustCounter(t, s, "Missing")
 	assert.False(t, ok)
 }
 
@@ -73,8 +75,8 @@ func TestFileStorageFileFormat(t *testing.T) {
 	path := tempPath(t)
 
 	s := newFileStorage(t, path, periodicInterval, false)
-	s.UpdateGauge("LastGC", 1257894000000000000)
-	s.UpdateCounter("NumGC", 42)
+	mustUpdateGauge(t, s, "LastGC", 1257894000000000000)
+	mustUpdateCounter(t, s, "NumGC", 42)
 	require.NoError(t, s.Save())
 
 	data, err := os.ReadFile(path)
@@ -92,7 +94,7 @@ func TestFileStorageRestoreDisabledIgnoresFile(t *testing.T) {
 
 	s := newFileStorage(t, path, periodicInterval, false)
 
-	assert.Empty(t, s.Counters())
+	assert.Empty(t, mustCounters(t, s))
 }
 
 func TestFileStorageRestoreNothingToLoad(t *testing.T) {
@@ -119,8 +121,8 @@ func TestFileStorageRestoreNothingToLoad(t *testing.T) {
 
 			s := newFileStorage(t, path, periodicInterval, true)
 
-			assert.Empty(t, s.Gauges())
-			assert.Empty(t, s.Counters())
+			assert.Empty(t, mustGauges(t, s))
+			assert.Empty(t, mustCounters(t, s))
 		})
 	}
 }
@@ -186,18 +188,40 @@ func TestFileStorageSyncWrite(t *testing.T) {
 	path := tempPath(t)
 	s := newFileStorage(t, path, syncInterval, false)
 
-	s.UpdateGauge("Alloc", 1.5)
-	assert.Equal(t, map[string]float64{"Alloc": 1.5}, newFileStorage(t, path, periodicInterval, true).Gauges())
+	mustUpdateGauge(t, s, "Alloc", 1.5)
+	assert.Equal(t, map[string]float64{"Alloc": 1.5}, mustGauges(t, newFileStorage(t, path, periodicInterval, true)))
 
-	assert.Equal(t, int64(7), s.UpdateCounter("PollCount", 7))
-	assert.Equal(t, map[string]int64{"PollCount": 7}, newFileStorage(t, path, periodicInterval, true).Counters())
+	assert.Equal(t, int64(7), mustUpdateCounter(t, s, "PollCount", 7))
+	assert.Equal(t, map[string]int64{"PollCount": 7}, mustCounters(t, newFileStorage(t, path, periodicInterval, true)))
+}
+
+func TestFileStorageUpdateBatch(t *testing.T) {
+	checkUpdateBatch(t, newFileStorage(t, tempPath(t), periodicInterval, false))
+}
+
+func TestFileStorageUpdateBatchOverflow(t *testing.T) {
+	checkUpdateBatchOverflow(t, newFileStorage(t, tempPath(t), periodicInterval, false))
+}
+
+func TestFileStorageUpdateBatchSyncWrite(t *testing.T) {
+	path := tempPath(t)
+	s := newFileStorage(t, path, syncInterval, false)
+
+	require.NoError(t, s.UpdateBatch(t.Context(), []models.Metrics{
+		gaugeMetric("Alloc", 1.5),
+		counterMetric("PollCount", 7),
+	}))
+
+	restored := newFileStorage(t, path, periodicInterval, true)
+	assert.Equal(t, map[string]float64{"Alloc": 1.5}, mustGauges(t, restored))
+	assert.Equal(t, map[string]int64{"PollCount": 7}, mustCounters(t, restored))
 }
 
 func TestFileStorageWithoutSyncWriteDoesNotWrite(t *testing.T) {
 	path := tempPath(t)
 	s := newFileStorage(t, path, periodicInterval, false)
 
-	s.UpdateGauge("Alloc", 1.5)
+	mustUpdateGauge(t, s, "Alloc", 1.5)
 
 	_, err := os.Stat(path)
 	assert.ErrorIs(t, err, os.ErrNotExist)
@@ -213,31 +237,32 @@ func TestFileStorageSyncWriteConcurrent(t *testing.T) {
 	for range workers {
 		wg.Go(func() {
 			for range updates {
-				s.UpdateCounter("PollCount", 1)
+				_, err := s.UpdateCounter(t.Context(), "PollCount", 1)
+				assert.NoError(t, err)
 			}
 		})
 	}
 	wg.Wait()
 
 	restored := newFileStorage(t, path, periodicInterval, true)
-	assert.Equal(t, map[string]int64{"PollCount": workers * updates}, restored.Counters())
+	assert.Equal(t, map[string]int64{"PollCount": workers * updates}, mustCounters(t, restored))
 }
 
 func TestFileStorageSaveReplacesContent(t *testing.T) {
 	path := tempPath(t)
 	s := newFileStorage(t, path, periodicInterval, false)
 
-	s.UpdateGauge("Alloc", 1.5)
-	s.UpdateCounter("PollCount", 1)
+	mustUpdateGauge(t, s, "Alloc", 1.5)
+	mustUpdateCounter(t, s, "PollCount", 1)
 	require.NoError(t, s.Save())
 
 	require.NoError(t, s.restore(nil))
-	s.UpdateGauge("Alloc", 2.5)
+	mustUpdateGauge(t, s, "Alloc", 2.5)
 	require.NoError(t, s.Save())
 
 	restored := newFileStorage(t, path, periodicInterval, true)
-	assert.Equal(t, map[string]float64{"Alloc": 2.5}, restored.Gauges())
-	assert.Empty(t, restored.Counters())
+	assert.Equal(t, map[string]float64{"Alloc": 2.5}, mustGauges(t, restored))
+	assert.Empty(t, mustCounters(t, restored))
 }
 
 func TestFileStorageSaveError(t *testing.T) {
@@ -245,7 +270,7 @@ func TestFileStorageSaveError(t *testing.T) {
 	path := filepath.Join(dir, "metrics.json")
 
 	s := newFileStorage(t, path, periodicInterval, false)
-	s.UpdateGauge("Alloc", 1.5)
+	mustUpdateGauge(t, s, "Alloc", 1.5)
 
 	// Каталог на месте целевого файла: заменить его файлом нельзя.
 	require.NoError(t, os.Mkdir(path, 0o755))
@@ -262,7 +287,7 @@ func TestFileStorageSaveError(t *testing.T) {
 func TestFileStorageSaveKeepsPermissions(t *testing.T) {
 	path := tempPath(t)
 	s := newFileStorage(t, path, periodicInterval, false)
-	s.UpdateGauge("Alloc", 1.5)
+	mustUpdateGauge(t, s, "Alloc", 1.5)
 	require.NoError(t, s.Save())
 
 	info, err := os.Stat(path)
@@ -282,10 +307,10 @@ func TestFileStorageSaveOverwritesStaleTemp(t *testing.T) {
 	require.NoError(t, os.WriteFile(path+".tmp", []byte("garbage"), 0o644))
 
 	s := newFileStorage(t, path, periodicInterval, false)
-	s.UpdateCounter("PollCount", 1)
+	mustUpdateCounter(t, s, "PollCount", 1)
 	require.NoError(t, s.Save())
 
-	assert.Equal(t, map[string]int64{"PollCount": 1}, newFileStorage(t, path, periodicInterval, true).Counters())
+	assert.Equal(t, map[string]int64{"PollCount": 1}, mustCounters(t, newFileStorage(t, path, periodicInterval, true)))
 
 	_, err := os.Stat(path + ".tmp")
 	assert.ErrorIs(t, err, os.ErrNotExist)
@@ -296,10 +321,10 @@ func TestFileStorageEmptyPathDisablesFile(t *testing.T) {
 	t.Chdir(dir)
 
 	s := newFileStorage(t, "", syncInterval, true)
-	s.UpdateGauge("Alloc", 1.5)
+	mustUpdateGauge(t, s, "Alloc", 1.5)
 	require.NoError(t, s.Save())
 
-	value, ok := s.Gauge("Alloc")
+	value, ok := mustGauge(t, s, "Alloc")
 	assert.True(t, ok)
 	assert.Equal(t, 1.5, value)
 
@@ -337,7 +362,7 @@ func waitDone(t *testing.T, done <-chan struct{}, msg string) {
 func TestFileStorageRunSavesPeriodically(t *testing.T) {
 	path := tempPath(t)
 	s := newFileStorage(t, path, 10*time.Millisecond, false)
-	s.UpdateCounter("PollCount", 3)
+	mustUpdateCounter(t, s, "PollCount", 3)
 
 	cancel, done := runInBackground(t, s)
 
@@ -349,7 +374,7 @@ func TestFileStorageRunSavesPeriodically(t *testing.T) {
 	cancel()
 	waitDone(t, done, "Run не завершился после отмены контекста")
 
-	assert.Equal(t, map[string]int64{"PollCount": 3}, newFileStorage(t, path, periodicInterval, true).Counters())
+	assert.Equal(t, map[string]int64{"PollCount": 3}, mustCounters(t, newFileStorage(t, path, periodicInterval, true)))
 }
 
 func TestFileStorageRunSkipsUnchanged(t *testing.T) {
@@ -365,7 +390,7 @@ func TestFileStorageRunSkipsUnchanged(t *testing.T) {
 
 	assert.Never(t, fileExists, 50*time.Millisecond, 5*time.Millisecond, "без изменений файл не создаётся")
 
-	s.UpdateGauge("Alloc", 1)
+	mustUpdateGauge(t, s, "Alloc", 1)
 	assert.Eventually(t, fileExists, time.Second, 5*time.Millisecond)
 
 	// Подменяем файл меткой: если Run перезапишет его без новых изменений,
@@ -388,7 +413,7 @@ func TestFileStorageRunReturnsSaveError(t *testing.T) {
 
 	s := newFileStorage(t, filepath.Join(dir, "metrics.json"), 5*time.Millisecond, false)
 	require.NoError(t, os.RemoveAll(dir))
-	s.UpdateGauge("Alloc", 1)
+	mustUpdateGauge(t, s, "Alloc", 1)
 
 	errCh := make(chan error, 1)
 	go func() { errCh <- s.Run(context.Background()) }()

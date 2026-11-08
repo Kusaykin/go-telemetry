@@ -2,7 +2,8 @@ package repository
 
 import (
 	"cmp"
-	"errors"
+	"context"
+	"fmt"
 	"maps"
 	"slices"
 	"sync"
@@ -23,52 +24,87 @@ func NewMemStorage() *MemStorage {
 	}
 }
 
-func (m *MemStorage) UpdateGauge(name string, value float64) {
+func (m *MemStorage) UpdateGauge(_ context.Context, name string, value float64) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	m.gauges[name] = value
+
+	return nil
 }
 
-func (m *MemStorage) UpdateCounter(name string, delta int64) int64 {
+func (m *MemStorage) UpdateCounter(_ context.Context, name string, delta int64) (int64, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	m.counters[name] += delta
+	value, err := models.AddDelta(m.counters[name], delta)
+	if err != nil {
+		return 0, fmt.Errorf("update counter %s: %w", name, err)
+	}
 
-	return m.counters[name]
+	m.counters[name] = value
+
+	return value, nil
 }
 
-func (m *MemStorage) Gauge(name string) (float64, bool) {
+func (m *MemStorage) UpdateBatch(_ context.Context, metrics []models.Metrics) error {
+	gauges, deltas, err := models.Collapse(metrics)
+	if err != nil {
+		return fmt.Errorf("update batch: %w", err)
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	counters := make(map[string]int64, len(deltas))
+	for name, delta := range deltas {
+		value, err := models.AddDelta(m.counters[name], delta)
+		if err != nil {
+			return fmt.Errorf("update batch: counter %s: %w", name, err)
+		}
+		counters[name] = value
+	}
+
+	maps.Copy(m.gauges, gauges)
+	maps.Copy(m.counters, counters)
+
+	return nil
+}
+
+func (m *MemStorage) Gauge(_ context.Context, name string) (float64, bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	value, ok := m.gauges[name]
 
-	return value, ok
+	return value, ok, nil
 }
 
-func (m *MemStorage) Counter(name string) (int64, bool) {
+func (m *MemStorage) Counter(_ context.Context, name string) (int64, bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	delta, ok := m.counters[name]
 
-	return delta, ok
+	return delta, ok, nil
 }
 
-func (m *MemStorage) Gauges() map[string]float64 {
+func (m *MemStorage) Gauges(context.Context) (map[string]float64, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	return maps.Clone(m.gauges)
+	return maps.Clone(m.gauges), nil
 }
 
-func (m *MemStorage) Counters() map[string]int64 {
+func (m *MemStorage) Counters(context.Context) (map[string]int64, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	return maps.Clone(m.counters)
+	return maps.Clone(m.counters), nil
+}
+
+func (m *MemStorage) PingContext(context.Context) error {
+	return nil
 }
 
 func (m *MemStorage) Snapshot() []models.Metrics {
@@ -97,10 +133,6 @@ func (m *MemStorage) restore(metrics []models.Metrics) error {
 	counters := make(map[string]int64)
 
 	for _, metric := range metrics {
-		if metric.ID == "" {
-			return errors.New("metric id is empty")
-		}
-
 		if err := metric.Validate(); err != nil {
 			return err
 		}

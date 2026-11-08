@@ -85,18 +85,42 @@ func checkPath(path string) error {
 	return nil
 }
 
-func (s *FileStorage) UpdateGauge(name string, value float64) {
-	s.MemStorage.UpdateGauge(name, value)
+func (s *FileStorage) UpdateGauge(ctx context.Context, name string, value float64) error {
+	if err := s.MemStorage.UpdateGauge(ctx, name, value); err != nil {
+		return err
+	}
+
 	s.dirty.Store(true)
 	s.saveIfSync()
+
+	return nil
 }
 
-func (s *FileStorage) UpdateCounter(name string, delta int64) int64 {
-	value := s.MemStorage.UpdateCounter(name, delta)
+func (s *FileStorage) UpdateCounter(ctx context.Context, name string, delta int64) (int64, error) {
+	value, err := s.MemStorage.UpdateCounter(ctx, name, delta)
+	if err != nil {
+		return 0, err
+	}
+
 	s.dirty.Store(true)
 	s.saveIfSync()
 
-	return value
+	return value, nil
+}
+
+func (s *FileStorage) UpdateBatch(ctx context.Context, metrics []models.Metrics) error {
+	if len(metrics) == 0 {
+		return nil
+	}
+
+	if err := s.MemStorage.UpdateBatch(ctx, metrics); err != nil {
+		return err
+	}
+
+	s.dirty.Store(true)
+	s.saveIfSync()
+
+	return nil
 }
 
 func (s *FileStorage) syncWrite() bool {
@@ -163,6 +187,11 @@ func (s *FileStorage) Save() error {
 	}
 
 	return nil
+}
+
+// Close сохраняет метрики при штатном завершении сервера.
+func (s *FileStorage) Close() error {
+	return s.Save()
 }
 
 func writeFileAtomic(path string, data []byte, perm os.FileMode) (err error) {
