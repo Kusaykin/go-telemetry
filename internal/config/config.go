@@ -18,6 +18,7 @@ const (
 	envReportInterval = "REPORT_INTERVAL"
 	envPollInterval   = "POLL_INTERVAL"
 	envKey            = "KEY"
+	envRateLimit      = "RATE_LIMIT"
 	keyUsage          = "`ключ` для подписи данных HMAC-SHA256 (пусто — без подписи)"
 )
 
@@ -53,6 +54,11 @@ func (fs *flagSet) secondsVar(dst *time.Duration, name, env, usage string) {
 
 func (fs *flagSet) nonNegativeSecondsVar(dst *time.Duration, name, env, usage string) {
 	fs.Var((*nonNegativeSecondsValue)(dst), name, usage)
+	fs.bindEnv(env, name)
+}
+
+func (fs *flagSet) boundedIntVar(dst *int, name, env, usage string, limit int) {
+	fs.Var(&boundedIntValue{dst: dst, limit: limit}, name, usage)
 	fs.bindEnv(env, name)
 }
 
@@ -146,9 +152,11 @@ func (v *secondsValue) String() string {
 const maxSeconds = int64(math.MaxInt64 / int64(time.Second))
 
 var (
+	errNotInt         = errors.New("ожидается целое число")
 	errNotSeconds     = errors.New("ожидается целое число секунд")
 	errNotPositive    = errors.New("должно быть больше нуля")
 	errNegative       = errors.New("не должно быть отрицательным")
+	errTooLarge       = errors.New("должно быть не больше")
 	errTooManySeconds = fmt.Errorf("должно быть не больше %d", maxSeconds)
 )
 
@@ -204,4 +212,36 @@ func parseSeconds(s string) (time.Duration, error) {
 	}
 
 	return time.Duration(seconds) * time.Second, nil
+}
+
+type boundedIntValue struct {
+	dst   *int
+	limit int
+}
+
+func (v *boundedIntValue) String() string {
+	if v.dst == nil {
+		return "0"
+	}
+
+	return strconv.Itoa(*v.dst)
+}
+
+func (v *boundedIntValue) Set(s string) error {
+	n, err := strconv.Atoi(s)
+	if err != nil && !errors.Is(err, strconv.ErrRange) {
+		return errNotInt
+	}
+
+	if n <= 0 {
+		return errNotPositive
+	}
+
+	if n > v.limit {
+		return fmt.Errorf("%w %d", errTooLarge, v.limit)
+	}
+
+	*v.dst = n
+
+	return nil
 }

@@ -1,7 +1,10 @@
 package agent
 
 import (
+	"strconv"
 	"testing"
+
+	"github.com/shirou/gopsutil/v4/cpu"
 
 	models "github.com/Kusaykin/go-telemetry/internal/model"
 	"github.com/stretchr/testify/assert"
@@ -54,7 +57,7 @@ func TestSnapshotHasAllMetrics(t *testing.T) {
 	c := NewCollector()
 	c.Poll()
 
-	metrics := c.Snapshot()
+	metrics, _ := c.TakeSnapshot()
 	require.Len(t, metrics, metricsCount)
 
 	for _, name := range wantRuntimeGauges {
@@ -73,54 +76,104 @@ func TestSnapshotHasAllMetrics(t *testing.T) {
 	assert.NotNil(t, poll.Delta)
 }
 
+func snapshot(c *Collector) []models.Metrics {
+	metrics, _ := c.TakeSnapshot()
+	return metrics
+}
+
 func TestPollCount(t *testing.T) {
 	c := NewCollector()
 	c.Poll()
 	c.Poll()
 	c.Poll()
+	assert.Equal(t, int64(3), c.PollCount())
 
-	m := findMetric(c.Snapshot(), PollCountName)
+	metrics, taken := c.TakeSnapshot()
+	m := findMetric(metrics, PollCountName)
 	require.NotNil(t, m.Delta)
 	assert.Equal(t, int64(3), *m.Delta)
-	assert.Equal(t, int64(3), c.PollCountDelta())
+	assert.Equal(t, int64(3), taken)
 }
 
-func TestPollCountResetAfterAck(t *testing.T) {
+func TestTakeSnapshotResetsPollCount(t *testing.T) {
 	c := NewCollector()
 	c.Poll()
 	c.Poll()
 
-	c.AckPollCount(c.PollCountDelta())
-	assert.Equal(t, int64(0), c.PollCountDelta())
+	_, taken := c.TakeSnapshot()
+	assert.Equal(t, int64(2), taken)
+	assert.Zero(t, c.PollCount())
 
 	c.Poll()
 
-	m := findMetric(c.Snapshot(), PollCountName)
+	m := findMetric(snapshot(c), PollCountName)
 	require.NotNil(t, m.Delta)
 	assert.Equal(t, int64(1), *m.Delta)
 }
 
-func TestPollCountAckKeepsNewPolls(t *testing.T) {
+func TestRestorePollCountKeepsNewPolls(t *testing.T) {
 	c := NewCollector()
 	c.Poll()
 	c.Poll()
 
-	sent := c.PollCountDelta()
+	_, taken := c.TakeSnapshot()
 	c.Poll()
-	c.AckPollCount(sent)
+	c.RestorePollCount(taken)
 
-	assert.Equal(t, int64(1), c.PollCountDelta())
+	assert.Equal(t, int64(3), c.PollCount())
+}
+
+func TestPollSystem(t *testing.T) {
+	c := NewCollector()
+	require.NoError(t, c.PollSystem(t.Context()))
+
+	cpus, err := cpu.Counts(true)
+	require.NoError(t, err)
+
+	metrics := snapshot(c)
+	require.Len(t, metrics, systemGaugesWithoutCPU+cpus+1)
+
+	total := findMetric(metrics, TotalMemoryName)
+	require.NotNil(t, total.Value)
+	assert.Positive(t, *total.Value)
+
+	free := findMetric(metrics, FreeMemoryName)
+	require.NotNil(t, free.Value)
+	assert.LessOrEqual(t, *free.Value, *total.Value)
+
+	for i := 1; i <= cpus; i++ {
+		name := CPUUtilizationPrefix + strconv.Itoa(i)
+		m := findMetric(metrics, name)
+		require.Equal(t, name, m.ID, "нет метрики "+name)
+		assert.Equal(t, models.Gauge, m.MType)
+		require.NotNil(t, m.Value)
+		assert.GreaterOrEqual(t, *m.Value, float64(0))
+		assert.LessOrEqual(t, *m.Value, float64(100))
+	}
+
+	assert.Zero(t, c.PollCount(), "PollSystem не увеличивает PollCount")
+}
+
+func TestSnapshotMergesRuntimeAndSystem(t *testing.T) {
+	c := NewCollector()
+	c.Poll()
+	require.NoError(t, c.PollSystem(t.Context()))
+
+	cpus, err := cpu.Counts(true)
+	require.NoError(t, err)
+
+	assert.Len(t, snapshot(c), metricsCount+systemGaugesWithoutCPU+cpus)
 }
 
 func TestRandomValueChanges(t *testing.T) {
 	c := NewCollector()
 
 	c.Poll()
-	first := findMetric(c.Snapshot(), RandomValueName)
+	first := findMetric(snapshot(c), RandomValueName)
 	require.NotNil(t, first.Value)
 
 	c.Poll()
-	second := findMetric(c.Snapshot(), RandomValueName)
+	second := findMetric(snapshot(c), RandomValueName)
 	require.NotNil(t, second.Value)
 
 	assert.NotEqual(t, *first.Value, *second.Value)
@@ -130,7 +183,7 @@ func TestMemStatsAreRead(t *testing.T) {
 	c := NewCollector()
 	c.Poll()
 
-	m := findMetric(c.Snapshot(), "Sys")
+	m := findMetric(snapshot(c), "Sys")
 	require.NotNil(t, m.Value)
 	assert.Greater(t, *m.Value, float64(0))
 }
