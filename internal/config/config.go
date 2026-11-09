@@ -7,6 +7,7 @@ import (
 	"io"
 	"math"
 	"strconv"
+	"strings"
 	"text/tabwriter"
 	"time"
 )
@@ -17,6 +18,9 @@ const (
 	envAddress        = "ADDRESS"
 	envReportInterval = "REPORT_INTERVAL"
 	envPollInterval   = "POLL_INTERVAL"
+	envKey            = "KEY"
+	envRateLimit      = "RATE_LIMIT"
+	keyUsage          = "`ключ` для подписи данных HMAC-SHA256 (пусто — без подписи)"
 )
 
 type LookupEnv func(key string) (string, bool)
@@ -51,6 +55,11 @@ func (fs *flagSet) secondsVar(dst *time.Duration, name, env, usage string) {
 
 func (fs *flagSet) nonNegativeSecondsVar(dst *time.Duration, name, env, usage string) {
 	fs.Var((*nonNegativeSecondsValue)(dst), name, usage)
+	fs.bindEnv(env, name)
+}
+
+func (fs *flagSet) boundedIntVar(dst *int, name, env, usage string, limit int) {
+	fs.Var(&boundedIntValue{dst: dst, limit: limit}, name, usage)
 	fs.bindEnv(env, name)
 }
 
@@ -144,9 +153,11 @@ func (v *secondsValue) String() string {
 const maxSeconds = int64(math.MaxInt64 / int64(time.Second))
 
 var (
+	errNotInt         = errors.New("ожидается целое число")
 	errNotSeconds     = errors.New("ожидается целое число секунд")
 	errNotPositive    = errors.New("должно быть больше нуля")
 	errNegative       = errors.New("не должно быть отрицательным")
+	errTooLarge       = errors.New("должно быть не больше")
 	errTooManySeconds = fmt.Errorf("должно быть не больше %d", maxSeconds)
 )
 
@@ -189,7 +200,14 @@ func (v *nonNegativeSecondsValue) Set(s string) error {
 
 func parseSeconds(s string) (time.Duration, error) {
 	seconds, err := strconv.ParseInt(s, 10, 64)
-	if err != nil && !errors.Is(err, strconv.ErrRange) {
+	switch {
+	case errors.Is(err, strconv.ErrRange):
+		if strings.HasPrefix(s, "-") {
+			return 0, errNegative
+		}
+
+		return 0, errTooManySeconds
+	case err != nil:
 		return 0, errNotSeconds
 	}
 
@@ -202,4 +220,47 @@ func parseSeconds(s string) (time.Duration, error) {
 	}
 
 	return time.Duration(seconds) * time.Second, nil
+}
+
+type boundedIntValue struct {
+	dst   *int
+	limit int
+}
+
+func (v *boundedIntValue) String() string {
+	if v.dst == nil {
+		return "0"
+	}
+
+	return strconv.Itoa(*v.dst)
+}
+
+func (v *boundedIntValue) Set(s string) error {
+	n, err := strconv.Atoi(s)
+	switch {
+	case errors.Is(err, strconv.ErrRange):
+		if strings.HasPrefix(s, "-") {
+			return errNotPositive
+		}
+
+		return v.errTooLarge()
+	case err != nil:
+		return errNotInt
+	}
+
+	if n <= 0 {
+		return errNotPositive
+	}
+
+	if n > v.limit {
+		return v.errTooLarge()
+	}
+
+	*v.dst = n
+
+	return nil
+}
+
+func (v *boundedIntValue) errTooLarge() error {
+	return fmt.Errorf("%w %d", errTooLarge, v.limit)
 }

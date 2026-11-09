@@ -14,6 +14,7 @@ import (
 	"github.com/Kusaykin/go-telemetry/internal/compress"
 	models "github.com/Kusaykin/go-telemetry/internal/model"
 	"github.com/Kusaykin/go-telemetry/internal/retry"
+	"github.com/Kusaykin/go-telemetry/internal/sign"
 )
 
 const (
@@ -25,9 +26,10 @@ const (
 type Client struct {
 	rest   *resty.Client
 	delays []time.Duration
+	key    []byte
 }
 
-func NewClient(addr string) *Client {
+func NewClient(addr, key string) *Client {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.DialContext = (&net.Dialer{Timeout: dialTimeout, KeepAlive: 30 * time.Second}).DialContext
 
@@ -38,6 +40,7 @@ func NewClient(addr string) *Client {
 			SetTimeout(requestTimeout).
 			SetHeader("Content-Type", contentTypeJSON),
 		delays: retry.Delays(),
+		key:    []byte(key),
 	}
 }
 
@@ -59,6 +62,11 @@ func (c *Client) post(ctx context.Context, path string, v easyjson.Marshaler) er
 		return fmt.Errorf("post %s: marshal: %w", path, err)
 	}
 
+	var hash string
+	if len(c.key) > 0 {
+		hash = sign.Sum(body, c.key)
+	}
+
 	body, err = compress.Compress(body)
 	if err != nil {
 		return fmt.Errorf("post %s: compress: %w", path, err)
@@ -66,11 +74,15 @@ func (c *Client) post(ctx context.Context, path string, v easyjson.Marshaler) er
 
 	var resp *resty.Response
 	err = retry.Do(ctx, c.delays, isConnError, func() error {
-		resp, err = c.rest.R().
+		req := c.rest.R().
 			SetContext(ctx).
 			SetHeader("Content-Encoding", "gzip").
-			SetBody(body).
-			Post(path)
+			SetBody(body)
+		if hash != "" {
+			req.SetHeader(sign.Header, hash)
+		}
+
+		resp, err = req.Post(path)
 		return err
 	})
 	if err != nil {

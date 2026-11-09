@@ -10,6 +10,7 @@ import (
 
 	"github.com/Kusaykin/go-telemetry/internal/handler"
 	models "github.com/Kusaykin/go-telemetry/internal/model"
+	"github.com/Kusaykin/go-telemetry/internal/sign"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -117,7 +118,7 @@ func TestUpdatesLogsRejectReason(t *testing.T) {
 			req := httptest.NewRequest(http.MethodPost, "/updates/", strings.NewReader(tt.body))
 			rec := httptest.NewRecorder()
 
-			handler.NewRouter(newFakeStorage(), nil, zap.New(core)).ServeHTTP(rec, req)
+			handler.NewRouter(newFakeStorage(), nil, zap.New(core), "").ServeHTTP(rec, req)
 
 			entries := logs.FilterMessage("updates: batch rejected").All()
 			require.Len(t, entries, 1)
@@ -149,8 +150,86 @@ func TestUpdatesGzip(t *testing.T) {
 	req.Header.Set("Content-Encoding", "gzip")
 	rec := httptest.NewRecorder()
 
-	handler.NewRouter(store, nil, zap.NewNop()).ServeHTTP(rec, req)
+	handler.NewRouter(store, nil, zap.NewNop(), "").ServeHTTP(rec, req)
 
 	require.Equal(t, http.StatusOK, rec.Code)
 	assert.Equal(t, int64(5), store.counters["PollCount"])
+}
+
+func TestUpdatesSigned(t *testing.T) {
+	const (
+		key  = "secret"
+		body = `[{"id":"PollCount","type":"counter","delta":5}]`
+	)
+
+	tests := []struct {
+		name      string
+		hash      string
+		want      int
+		wantDelta int64
+	}{
+		{"верная подпись", sign.Sum([]byte(body), []byte(key)), http.StatusOK, 5},
+		{"без подписи", "", http.StatusBadRequest, 0},
+		{"неверная подпись", sign.Sum([]byte(body), []byte("other")), http.StatusBadRequest, 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := newFakeStorage()
+			req := httptest.NewRequest(http.MethodPost, "/updates/", bytes.NewReader(gzipBody(t, body)))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Content-Encoding", "gzip")
+			if tt.hash != "" {
+				req.Header.Set(sign.Header, tt.hash)
+			}
+			rec := httptest.NewRecorder()
+
+			handler.NewRouter(store, nil, zap.NewNop(), key).ServeHTTP(rec, req)
+
+			require.Equal(t, tt.want, rec.Code)
+			assert.Equal(t, tt.wantDelta, store.counters["PollCount"])
+			assert.True(t, sign.Verify(rec.Body.Bytes(), []byte(key), rec.Header().Get(sign.Header)))
+		})
+	}
+}
+
+func TestRouterUnsignedWithKey(t *testing.T) {
+	const key = "secret"
+
+	tests := []struct {
+		name   string
+		method string
+		path   string
+		body   string
+		want   int
+	}{
+		{"HTML-страница", http.MethodGet, "/", "", http.StatusOK},
+		{"значение по URL", http.MethodGet, "/value/gauge/Alloc", "", http.StatusOK},
+		{"значение JSON", http.MethodPost, "/value/", `{"id":"Alloc","type":"gauge"}`, http.StatusOK},
+		{"обновление по URL", http.MethodPost, "/update/gauge/Alloc/1", "", http.StatusBadRequest},
+		{"обновление JSON", http.MethodPost, "/update/", `{"id":"Alloc","type":"gauge","value":1}`, http.StatusBadRequest},
+		{"пакетное обновление", http.MethodPost, "/updates/", `[{"id":"Alloc","type":"gauge","value":1}]`, http.StatusBadRequest},
+		{"неизвестный путь", http.MethodPost, "/unknown", "", http.StatusNotFound},
+		{"GET вместо POST на обновлении", http.MethodGet, "/update/gauge/Alloc/1", "", http.StatusMethodNotAllowed},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := newFakeStorage()
+			store.gauges["Alloc"] = 12.5
+
+			req := httptest.NewRequest(tt.method, tt.path, strings.NewReader(tt.body))
+			if tt.body != "" {
+				req.Header.Set("Content-Type", "application/json")
+			}
+			rec := httptest.NewRecorder()
+
+			handler.NewRouter(store, nil, zap.NewNop(), key).ServeHTTP(rec, req)
+
+			require.Equal(t, tt.want, rec.Code)
+			assert.Equal(t, 12.5, store.gauges["Alloc"], "неподписанный запрос не должен менять метрики")
+			assert.True(t, sign.Verify(rec.Body.Bytes(), []byte(key), rec.Header().Get(sign.Header)),
+				"ответ должен быть подписан")
+		})
+	}
 }

@@ -42,7 +42,7 @@ func TestPing(t *testing.T) {
 			req := httptest.NewRequest(tt.method, "/ping", nil)
 			rec := httptest.NewRecorder()
 
-			handler.NewRouter(newFakeStorage(), tt.db, zap.New(core)).ServeHTTP(rec, req)
+			handler.NewRouter(newFakeStorage(), tt.db, zap.New(core), "").ServeHTTP(rec, req)
 
 			assert.Equal(t, tt.want, rec.Code)
 			if tt.wantLog == "" {
