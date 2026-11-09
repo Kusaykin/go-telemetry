@@ -169,7 +169,7 @@ func TestUpdatesSigned(t *testing.T) {
 		wantDelta int64
 	}{
 		{"верная подпись", sign.Sum([]byte(body), []byte(key)), http.StatusOK, 5},
-		{"без подписи", "", http.StatusOK, 5},
+		{"без подписи", "", http.StatusBadRequest, 0},
 		{"неверная подпись", sign.Sum([]byte(body), []byte("other")), http.StatusBadRequest, 0},
 	}
 
@@ -189,6 +189,47 @@ func TestUpdatesSigned(t *testing.T) {
 			require.Equal(t, tt.want, rec.Code)
 			assert.Equal(t, tt.wantDelta, store.counters["PollCount"])
 			assert.True(t, sign.Verify(rec.Body.Bytes(), []byte(key), rec.Header().Get(sign.Header)))
+		})
+	}
+}
+
+func TestRouterUnsignedWithKey(t *testing.T) {
+	const key = "secret"
+
+	tests := []struct {
+		name   string
+		method string
+		path   string
+		body   string
+		want   int
+	}{
+		{"HTML-страница", http.MethodGet, "/", "", http.StatusOK},
+		{"значение по URL", http.MethodGet, "/value/gauge/Alloc", "", http.StatusOK},
+		{"значение JSON", http.MethodPost, "/value/", `{"id":"Alloc","type":"gauge"}`, http.StatusOK},
+		{"обновление по URL", http.MethodPost, "/update/gauge/Alloc/1", "", http.StatusBadRequest},
+		{"обновление JSON", http.MethodPost, "/update/", `{"id":"Alloc","type":"gauge","value":1}`, http.StatusBadRequest},
+		{"пакетное обновление", http.MethodPost, "/updates/", `[{"id":"Alloc","type":"gauge","value":1}]`, http.StatusBadRequest},
+		{"неизвестный путь", http.MethodPost, "/unknown", "", http.StatusNotFound},
+		{"GET вместо POST на обновлении", http.MethodGet, "/update/gauge/Alloc/1", "", http.StatusMethodNotAllowed},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := newFakeStorage()
+			store.gauges["Alloc"] = 12.5
+
+			req := httptest.NewRequest(tt.method, tt.path, strings.NewReader(tt.body))
+			if tt.body != "" {
+				req.Header.Set("Content-Type", "application/json")
+			}
+			rec := httptest.NewRecorder()
+
+			handler.NewRouter(store, nil, zap.NewNop(), key).ServeHTTP(rec, req)
+
+			require.Equal(t, tt.want, rec.Code)
+			assert.Equal(t, 12.5, store.gauges["Alloc"], "неподписанный запрос не должен менять метрики")
+			assert.True(t, sign.Verify(rec.Body.Bytes(), []byte(key), rec.Header().Get(sign.Header)),
+				"ответ должен быть подписан")
 		})
 	}
 }

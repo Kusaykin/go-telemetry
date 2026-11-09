@@ -40,30 +40,40 @@ func (w *hashResponseWriter) flush(key []byte) error {
 	return err
 }
 
-func Hash(key []byte) func(http.Handler) http.Handler {
+func SignResponse(key []byte) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			hw := &hashResponseWriter{ResponseWriter: w}
 
-			if sum := r.Header.Get(sign.Header); sum != "" {
-				body, err := io.ReadAll(r.Body)
-				if err != nil {
-					http.Error(hw, "cannot read request body", http.StatusBadRequest)
-					_ = hw.flush(key)
-					return
-				}
-
-				if !sign.Verify(body, key, sum) {
-					http.Error(hw, "invalid "+sign.Header, http.StatusBadRequest)
-					_ = hw.flush(key)
-					return
-				}
-
-				r.Body = io.NopCloser(bytes.NewReader(body))
-			}
-
 			next.ServeHTTP(hw, r)
 			_ = hw.flush(key)
+		})
+	}
+}
+
+func VerifyRequest(key []byte) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			sum := r.Header.Get(sign.Header)
+			if sum == "" {
+				http.Error(w, "missing "+sign.Header, http.StatusBadRequest)
+				return
+			}
+
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				http.Error(w, "cannot read request body", http.StatusBadRequest)
+				return
+			}
+
+			if !sign.Verify(body, key, sum) {
+				http.Error(w, "invalid "+sign.Header, http.StatusBadRequest)
+				return
+			}
+
+			r.Body = io.NopCloser(bytes.NewReader(body))
+
+			next.ServeHTTP(w, r)
 		})
 	}
 }

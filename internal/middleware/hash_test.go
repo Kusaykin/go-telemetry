@@ -20,7 +20,6 @@ const (
 	testRespBody = `{"id":"PollCount","type":"counter","delta":5}`
 )
 
-// echoHandler запоминает тело запроса и отвечает фиксированным JSON.
 func echoHandler(called *bool, got *string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		*called = true
@@ -33,7 +32,11 @@ func echoHandler(called *bool, got *string) http.Handler {
 	})
 }
 
-func TestHash(t *testing.T) {
+func signedRoute(key []byte, next http.Handler) http.Handler {
+	return SignResponse(key)(VerifyRequest(key)(next))
+}
+
+func TestVerifyRequest(t *testing.T) {
 	key := []byte(testKey)
 
 	tests := []struct {
@@ -43,7 +46,7 @@ func TestHash(t *testing.T) {
 		wantCalled bool
 	}{
 		{"верная подпись", sign.Sum([]byte(testReqBody), key), http.StatusOK, true},
-		{"без подписи", "", http.StatusOK, true},
+		{"без подписи", "", http.StatusBadRequest, false},
 		{"неверная подпись", sign.Sum([]byte(testReqBody), []byte("other")), http.StatusBadRequest, false},
 		{"подпись не hex", "not-hex", http.StatusBadRequest, false},
 	}
@@ -61,7 +64,7 @@ func TestHash(t *testing.T) {
 			}
 			rec := httptest.NewRecorder()
 
-			Hash(key)(echoHandler(&called, &got)).ServeHTTP(rec, req)
+			signedRoute(key, echoHandler(&called, &got)).ServeHTTP(rec, req)
 
 			assert.Equal(t, tt.wantStatus, rec.Code)
 			assert.Equal(t, tt.wantCalled, called)
@@ -74,12 +77,11 @@ func TestHash(t *testing.T) {
 			assert.Equal(t, testReqBody, got, "обработчик должен получить исходное тело")
 			assert.Equal(t, testRespBody, rec.Body.String())
 			assert.Equal(t, "application/json", rec.Header().Get("Content-Type"))
-			assert.True(t, sign.Verify(rec.Body.Bytes(), key, rec.Header().Get(sign.Header)))
 		})
 	}
 }
 
-func TestHashWithoutBody(t *testing.T) {
+func TestVerifyRequestWithoutBody(t *testing.T) {
 	key := []byte(testKey)
 
 	tests := []struct {
@@ -88,7 +90,7 @@ func TestHashWithoutBody(t *testing.T) {
 		wantStatus int
 		wantCalled bool
 	}{
-		{"без подписи", "", http.StatusOK, true},
+		{"без подписи", "", http.StatusBadRequest, false},
 		{"подпись пустого тела", sign.Sum(nil, key), http.StatusOK, true},
 		{"неверная подпись", sign.Sum([]byte(testReqBody), key), http.StatusBadRequest, false},
 	}
@@ -106,7 +108,7 @@ func TestHashWithoutBody(t *testing.T) {
 			}
 			rec := httptest.NewRecorder()
 
-			Hash(key)(echoHandler(&called, &got)).ServeHTTP(rec, req)
+			signedRoute(key, echoHandler(&called, &got)).ServeHTTP(rec, req)
 
 			assert.Equal(t, tt.wantStatus, rec.Code)
 			assert.Equal(t, tt.wantCalled, called)
@@ -115,8 +117,29 @@ func TestHashWithoutBody(t *testing.T) {
 	}
 }
 
-func TestHashPanicNotReportedAsSuccess(t *testing.T) {
-	h := Hash([]byte(testKey))(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+func TestSignResponseWithoutRequestSignature(t *testing.T) {
+	key := []byte(testKey)
+
+	for _, method := range []string{http.MethodGet, http.MethodHead, http.MethodPost} {
+		t.Run(method, func(t *testing.T) {
+			var (
+				called bool
+				got    string
+			)
+
+			rec := httptest.NewRecorder()
+			SignResponse(key)(echoHandler(&called, &got)).
+				ServeHTTP(rec, httptest.NewRequest(method, "/value/counter/PollCount", nil))
+
+			assert.Equal(t, http.StatusOK, rec.Code)
+			assert.True(t, called)
+			assert.True(t, sign.Verify(rec.Body.Bytes(), key, rec.Header().Get(sign.Header)))
+		})
+	}
+}
+
+func TestSignResponsePanicNotReportedAsSuccess(t *testing.T) {
+	h := SignResponse([]byte(testKey))(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte("partial"))
 		panic("storage failure")
 	}))
@@ -129,8 +152,8 @@ func TestHashPanicNotReportedAsSuccess(t *testing.T) {
 	assert.Empty(t, rec.Header().Get(sign.Header), "после паники подпись не должна отправляться")
 }
 
-func TestHashKeepsStatusCode(t *testing.T) {
-	h := Hash([]byte(testKey))(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+func TestSignResponseKeepsStatusCode(t *testing.T) {
+	h := SignResponse([]byte(testKey))(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not found", http.StatusNotFound)
 	}))
 
@@ -141,8 +164,8 @@ func TestHashKeepsStatusCode(t *testing.T) {
 	assert.True(t, sign.Verify(rec.Body.Bytes(), []byte(testKey), rec.Header().Get(sign.Header)))
 }
 
-func TestHashEmptyResponse(t *testing.T) {
-	h := Hash([]byte(testKey))(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+func TestSignResponseEmptyResponse(t *testing.T) {
+	h := SignResponse([]byte(testKey))(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/update/gauge/x/1", nil))
@@ -151,15 +174,15 @@ func TestHashEmptyResponse(t *testing.T) {
 	assert.Equal(t, sign.Sum(nil, []byte(testKey)), rec.Header().Get(sign.Header))
 }
 
-// Gzip снаружи, Hash внутри: подпись запроса и ответа считается от несжатых данных.
-func TestHashBehindGzip(t *testing.T) {
+// Gzip снаружи, подпись внутри: подпись запроса и ответа считается от несжатых данных.
+func TestSignBehindGzip(t *testing.T) {
 	key := []byte(testKey)
 
 	var (
 		called bool
 		got    string
 	)
-	h := Gzip(Hash(key)(echoHandler(&called, &got)))
+	h := Gzip(signedRoute(key, echoHandler(&called, &got)))
 
 	var compressed bytes.Buffer
 	zw := gzip.NewWriter(&compressed)
