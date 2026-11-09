@@ -7,6 +7,7 @@ import (
 	"io"
 	"math"
 	"strconv"
+	"strings"
 	"text/tabwriter"
 	"time"
 )
@@ -199,7 +200,14 @@ func (v *nonNegativeSecondsValue) Set(s string) error {
 
 func parseSeconds(s string) (time.Duration, error) {
 	seconds, err := strconv.ParseInt(s, 10, 64)
-	if err != nil && !errors.Is(err, strconv.ErrRange) {
+	switch {
+	case errors.Is(err, strconv.ErrRange):
+		if strings.HasPrefix(s, "-") {
+			return 0, errNegative
+		}
+
+		return 0, errTooManySeconds
+	case err != nil:
 		return 0, errNotSeconds
 	}
 
@@ -229,7 +237,14 @@ func (v *boundedIntValue) String() string {
 
 func (v *boundedIntValue) Set(s string) error {
 	n, err := strconv.Atoi(s)
-	if err != nil && !errors.Is(err, strconv.ErrRange) {
+	switch {
+	case errors.Is(err, strconv.ErrRange):
+		if strings.HasPrefix(s, "-") {
+			return errNotPositive
+		}
+
+		return v.errTooLarge()
+	case err != nil:
 		return errNotInt
 	}
 
@@ -238,10 +253,14 @@ func (v *boundedIntValue) Set(s string) error {
 	}
 
 	if n > v.limit {
-		return fmt.Errorf("%w %d", errTooLarge, v.limit)
+		return v.errTooLarge()
 	}
 
 	*v.dst = n
 
 	return nil
+}
+
+func (v *boundedIntValue) errTooLarge() error {
+	return fmt.Errorf("%w %d", errTooLarge, v.limit)
 }
